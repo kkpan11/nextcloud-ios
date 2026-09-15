@@ -1,25 +1,6 @@
-//
-//  NCMedia+CollectionViewDataSource.swift
-//  Nextcloud
-//
-//  Created by Marino Faggiana on 16/07/24.
-//  Copyright © 2024 Marino Faggiana. All rights reserved.
-//
-//  Author Marino Faggiana <marino.faggiana@nextcloud.com>
-//
-//  This program is free software: you can redistribute it and/or modify
-//  it under the terms of the GNU General Public License as published by
-//  the Free Software Foundation, either version 3 of the License, or
-//  (at your option) any later version.
-//
-//  This program is distributed in the hope that it will be useful,
-//  but WITHOUT ANY WARRANTY; without even the implied warranty of
-//  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-//  GNU General Public License for more details.
-//
-//  You should have received a copy of the GNU General Public License
-//  along with this program.  If not, see <http://www.gnu.org/licenses/>.
-//
+// SPDX-FileCopyrightText: Nextcloud GmbH
+// SPDX-FileCopyrightText: 2019 Marino Faggiana
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 import UIKit
 import NextcloudKit
@@ -28,99 +9,303 @@ import RealmSwift
 extension NCMedia: UICollectionViewDataSource {
     func collectionView(_ collectionView: UICollectionView, viewForSupplementaryElementOfKind kind: String, at indexPath: IndexPath) -> UICollectionReusableView {
         if kind == mediaSectionHeader {
-            guard let header = collectionView.dequeueReusableSupplementaryView(ofKind: kind, withReuseIdentifier: "sectionFirstHeaderEmptyData", for: indexPath) as? NCSectionFirstHeaderEmptyData else { return NCSectionFirstHeaderEmptyData() }
-            header.emptyImage.image = utility.loadImage(named: "photo", colors: [NCBrandColor.shared.brandElement])
-            if loadingTask != nil || imageCache.createMediaCacheInProgress {
-                header.emptyTitle.text = NSLocalizedString("_search_in_progress_", comment: "")
-            } else {
-                header.emptyTitle.text = NSLocalizedString("_tutorial_photo_view_", comment: "")
+            if dataSource.isEmpty() {
+                guard let header = collectionView.dequeueReusableSupplementaryView(
+                    ofKind: kind,
+                    withReuseIdentifier: "sectionFirstHeaderEmptyData",
+                    for: indexPath
+                ) as? NCSectionFirstHeaderEmptyData else {
+                    return NCSectionFirstHeaderEmptyData()
+                }
+                header.emptyImage.isHidden = false
+                header.emptyDescription.isHidden = false
+                header.isUserInteractionEnabled = false
+
+                header.emptyImage.image = utility.loadImage(
+                    named: "photo",
+                    colors: [
+                        NCBrandColor.shared.getElement(
+                            account: session.account
+                        )
+                    ]
+                )
+
+                if searchMediaInProgress || datasourceMediaInProgress {
+                    header.emptyTitle.text = NSLocalizedString(
+                        "_search_in_progress_",
+                        comment: ""
+                    )
+                } else {
+                    header.emptyTitle.text = NSLocalizedString(
+                        "_tutorial_photo_view_",
+                        comment: ""
+                    )
+                }
+
+                header.emptyDescription.text = ""
+
+                return header
             }
-            header.emptyDescription.text = ""
+
+            guard let header = collectionView.dequeueReusableSupplementaryView(
+                ofKind: kind,
+                withReuseIdentifier: "sectionHeader",
+                for: indexPath
+            ) as? NCMediaSectionHeader else {
+                return NCMediaSectionHeader()
+            }
+            header.isUserInteractionEnabled = false
+
+            guard let yearMonth = dataSource.yearMonth(for: indexPath.section) else {
+                header.titleLabel.text = nil
+                return header
+            }
+
+            var components = DateComponents()
+            components.year = yearMonth.year
+            components.month = yearMonth.month
+            components.day = 1
+
+            if let date = Calendar.current.date(from: components) {
+                header.titleLabel.text = date.formatted(
+                    .dateTime
+                        .month(.wide)
+                        .year()
+                )
+            } else {
+                header.titleLabel.text = "\(yearMonth.month)/\(yearMonth.year)"
+            }
+
             return header
         }
-        return UICollectionReusableView()
+
+        guard let footer = collectionView.dequeueReusableSupplementaryView(
+            ofKind: kind,
+            withReuseIdentifier: "sectionFooter",
+            for: indexPath
+        ) as? NCSectionFooter else {
+            return NCSectionFooter()
+        }
+
+        guard indexPath.section == dataSource.numberOfSections - 1 else {
+            footer.setTitleLabel("")
+            return footer
+        }
+
+        let images = dataSource.compactMetadatas.filter(\.isImage).count
+        let videos = dataSource.compactMetadatas.count - images
+
+        footer.setTitleLabel(
+            "\(images) "
+            + NSLocalizedString("_images_", comment: "")
+            + " • "
+            + "\(videos) "
+            + NSLocalizedString("_video_", comment: "")
+        )
+
+        return footer
     }
 
     func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int {
-        var numberOfItemsInSection = 0
-        if let metadatas { numberOfItemsInSection = metadatas.count }
-        if numberOfItemsInSection == 0 {
-            selectOrCancelButton.isHidden = true
-            menuButton.isHidden = false
-            gradientView.isHidden = true
-            activityIndicatorTrailing.constant = 50
-        } else if isEditMode {
-            selectOrCancelButton.isHidden = false
-            menuButton.isHidden = true
-            activityIndicatorTrailing.constant = 150
-        } else {
-            selectOrCancelButton.isHidden = false
-            menuButton.isHidden = false
-            activityIndicatorTrailing.constant = 150
+        guard !dataSource.isEmpty() else {
+            return 0
         }
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { self.setTitleDate() }
-        return numberOfItemsInSection
+        return dataSource.numberOfItems(in: section)
     }
 
-    func collectionView(_ collectionView: UICollectionView, didEndDisplaying cell: UICollectionViewCell, forItemAt indexPath: IndexPath) {
-        guard let metadatas else { return }
+    func numberOfSections(in collectionView: UICollectionView) -> Int {
+        dataSource.isEmpty() ? 1 : dataSource.numberOfSections
+    }
 
-        if !collectionView.indexPathsForVisibleItems.contains(indexPath) && indexPath.row < metadatas.count {
-            guard let metadata = metadatas[indexPath.row] else { return }
-            for case let operation as NCMediaDownloadThumbnaill in NCNetworking.shared.downloadThumbnailQueue.operations where operation.metadata.ocId == metadata.ocId {
-                operation.cancel()
-            }
-            for case let operation as NCOperationConvertLivePhoto in NCNetworking.shared.convertLivePhotoQueue.operations where operation.ocId == metadata.ocId {
-                operation.cancel()
+    func collectionView(_ collectionView: UICollectionView,
+                        didEndDisplaying cell: UICollectionViewCell,
+                        forItemAt indexPath: IndexPath) {
+        guard let cell = cell as? NCMediaCell else {
+            return
+        }
+
+        Task {
+            await NCTransferCoordinator.shared.cancel(identifier: cell.identifier)
+        }
+    }
+
+    func collectionView(_ collectionView: UICollectionView,
+                        willDisplay cell: UICollectionViewCell,
+                        forItemAt indexPath: IndexPath) {
+        guard let compactMetadata = dataSource.getCompactMetadata(indexPath: indexPath) else {
+            return
+        }
+        let ocId = compactMetadata.ocId
+        let ext = NCGlobal.shared.getSizeExtension(column: self.numberOfColumns)
+        let imageExists = self.utilityFileSystem.fileProviderStorageImageExists(ocId, etag: compactMetadata.etag, userId: self.session.userId, urlBase: self.session.urlBase)
+
+        guard !imageExists else {
+            return
+        }
+
+        Task {
+            await NCTransferCoordinator.shared.start(
+                identifier: ocId,
+                priority: .visible
+            ) {
+                guard var metadata = await NCManageDatabase.shared.getMetadataFromOcIdAsync(ocId) else {
+                    return
+                }
+
+                if metadata.placeholder {
+                    let result = await self.networking.readFileAsync(
+                        serverUrlFileName: metadata.serverUrlFileName,
+                        account: metadata.account
+                    )
+
+                    guard !Task.isCancelled,
+                          result.error == .success,
+                          let hydratedMetadata = result.metadata else {
+                        return
+                    }
+
+                    await self.database.addMetadataAsync(hydratedMetadata)
+                    metadata = hydratedMetadata
+                }
+
+                let iconName = metadata.iconName
+                let account = metadata.account
+
+                let result = await NextcloudKit.shared.downloadPreviewAsync(
+                    fileId: metadata.fileId,
+                    etag: metadata.etag,
+                    account: metadata.account
+                )
+
+                guard !Task.isCancelled,
+                      result.error == .success,
+                      let data = result.responseData?.data else {
+                    return
+                }
+
+                let image = NCUtility().createImageFileFrom(
+                    data: data,
+                    metadata: metadata,
+                    ext: ext)
+
+                await MainActor.run {
+                    guard let visibleIndexPath = self.collectionView.indexPathsForVisibleItems.first(where: {
+                        self.dataSource.getCompactMetadata(indexPath: $0)?.ocId == ocId
+                    }),
+                    let cell = self.collectionView.cellForItem(at: visibleIndexPath) as? NCMediaCell, cell.identifier == ocId else {
+                        return
+                    }
+
+                    if let image {
+                        cell.image.contentMode = .scaleAspectFill
+
+                        UIView.transition(
+                            with: cell.image,
+                            duration: 0.75,
+                            options: .transitionCrossDissolve
+                        ) {
+                            cell.image.image = image
+                        }
+                    } else {
+                        cell.image.contentMode = .scaleAspectFit
+                        cell.image.image = NCUtility().loadImage(
+                            named: iconName,
+                            useTypeIconFile: true,
+                            account: account
+                        )
+                    }
+                }
             }
         }
     }
 
     func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
-        guard let cell = collectionView.dequeueReusableCell(withReuseIdentifier: "gridCell", for: indexPath) as? NCGridMediaCell,
-              let metadatas = self.metadatas,
-              let metadata = metadatas[indexPath.row]
-        else {
-            return NCGridMediaCell()
+        guard let cell = collectionView.dequeueReusableCell(
+            withReuseIdentifier: "mediaCell",
+            for: indexPath
+        ) as? NCMediaCell else {
+            fatalError("Unable to dequeue MediaCell with identifier mediaCell")
         }
 
-        cell.date = metadata.date as Date
-        cell.ocId = metadata.ocId
-        cell.indexPath = indexPath
-        cell.user = metadata.ownerId
-        cell.imageStatus.image = nil
-        cell.imageItem.contentMode = .scaleAspectFill
+        guard let compactMetadata = dataSource.getCompactMetadata(indexPath: indexPath) else {
+            return cell
+        }
 
-        if let image = getImage(metadata: metadata) {
-            cell.imageItem.image = image
-        } else if !metadata.hasPreview {
-            cell.imageItem.backgroundColor = .clear
-            cell.imageItem.contentMode = .center
-            if metadata.isImage {
-                cell.imageItem.image = photoImage
-            } else {
-                cell.imageItem.image = videoImage
+        let ocId = compactMetadata.ocId
+        let etag = compactMetadata.etag
+        let ext = global.getSizeExtension(column: numberOfColumns)
+        let cacheKey = "\(ocId)-\(etag)-\(ext)"
+
+        cell.image.image = imageCache.getImageCache(ocId: ocId, etag: etag, ext: ext)
+        cell.date = compactMetadata.date
+        cell.identifier = ocId
+        cell.imageStatus.image = nil
+
+        if cell.image.frame.width > 60 {
+            if compactMetadata.isVideo {
+                cell.imageStatus.image = playImage
+            } else if compactMetadata.isLivePhoto {
+                cell.imageStatus.image = livePhotoImage
             }
         }
 
-        // Convert OLD Live Photo
-        if NCGlobal.shared.isLivePhotoServerAvailable, metadata.isLivePhoto, metadata.isNotFlaggedAsLivePhotoByServer {
-            NCNetworking.shared.convertLivePhoto(metadata: metadata)
+        let selectionColor = NCBrandColor.shared.getElement(
+            account: session.account
+        )
+
+        cell.selected(isEditMode && fileSelect.contains(ocId), color: selectionColor)
+
+        guard cell.image.image == nil,
+              imageLoadingTasks[cacheKey] == nil else {
+            return cell
         }
 
-        if metadata.isAudioOrVideo {
-           cell.imageStatus.image = playImage
-        } else if metadata.isLivePhoto {
-            cell.imageStatus.image = livePhotoImage
-        } else {
-            cell.imageStatus.image = nil
-        }
+        let userId = session.userId
+        let urlBase = session.urlBase
 
-        if isEditMode, selectOcId.contains(metadata.ocId) {
-            cell.selected(true)
-        } else {
-            cell.selected(false)
+        imageLoadingTasks[cacheKey] = Task(priority: .utility) { [weak self, weak collectionView] in
+            guard let self else {
+                return
+            }
+
+            let image = await Task.detached(priority: .utility) {
+                self.utility.getImage(
+                    ocId: ocId,
+                    etag: etag,
+                    ext: ext,
+                    userId: userId,
+                    urlBase: urlBase
+                )
+            }.value
+
+            guard !Task.isCancelled else {
+                await MainActor.run {
+                    self.imageLoadingTasks[cacheKey] = nil
+                }
+                return
+            }
+
+            await MainActor.run {
+                defer {
+                    self.imageLoadingTasks[cacheKey] = nil
+                }
+
+                guard let image else {
+                    return
+                }
+
+                self.imageCache.addImageCache(ocId: ocId, etag: etag, image: image, ext: ext)
+
+                guard let collectionView,
+                      let currentCell = collectionView.cellForItem(
+                        at: indexPath
+                      ) as? NCMediaCell,
+                      currentCell.identifier == ocId else {
+                    return
+                }
+
+                currentCell.image.image = image
+            }
         }
 
         return cell

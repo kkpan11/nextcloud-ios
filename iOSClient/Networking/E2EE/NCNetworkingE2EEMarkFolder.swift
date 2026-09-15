@@ -1,51 +1,100 @@
-//
-//  NCNetworkingE2EEMarkFolder.swift
-//  Nextcloud
-//
-//  Created by Marino Faggiana on 24/08/23.
-//  Copyright © 2022 Marino Faggiana. All rights reserved.
-//
-//  This program is free software: you can redistribute it and/or modify
-//  it under the terms of the GNU General Public License as published by
-//  the Free Software Foundation, either version 3 of the License, or
-//  (at your option) any later version.
-//
-//  This program is distributed in the hope that it will be useful,
-//  but WITHOUT ANY WARRANTY; without even the implied warranty of
-//  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-//  GNU General Public License for more details.
-//
-//  You should have received a copy of the GNU General Public License
-//  along with this program.  If not, see <http://www.gnu.org/licenses/>.
-//
+// SPDX-FileCopyrightText: Nextcloud GmbH
+// SPDX-FileCopyrightText: 2022 Marino Faggiana
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 import Foundation
+import UIKit
 import NextcloudKit
+import LucidBanner
 
+@MainActor
 class NCNetworkingE2EEMarkFolder: NSObject {
+    let database = NCManageDatabase.shared
 
-    func markFolderE2ee(account: String, fileName: String, serverUrl: String, userId: String) async -> NKError {
+    func markFolderE2ee(account: String, serverUrlFileName: String, userId: String, sceneIdentifier: String?) async -> NKError {
+        var banner: LucidBanner?
+        var token: Int?
+        var error = NKError()
 
-        let serverUrlFileName = serverUrl + "/" + fileName
+        defer {
+            if let banner, let token {
+                if error == .success {
+                    completeHudIndeterminateBannerSuccess(token: token, banner: banner)
+                } else {
+                    banner.dismiss()
+                }
+            }
+        }
 
-        let resultsReadFileOrFolder = await NCNetworking.shared.readFileOrFolder(serverUrlFileName: serverUrlFileName, depth: "0")
-        guard resultsReadFileOrFolder.error == .success, let file = resultsReadFileOrFolder.files.first else { return resultsReadFileOrFolder.error }
+        let serverKeyError = await NCNetworkingE2EE().validateCurrentServerKey(account: account)
+        guard serverKeyError == .success else {
+            return serverKeyError
+        }
 
-        let resultsMarkE2EEFolder = await NCNetworking.shared.markE2EEFolder(fileId: file.fileId, delete: false, options: NCNetworkingE2EE().getOptions())
-        guard resultsMarkE2EEFolder.error == .success else { return resultsMarkE2EEFolder.error }
+        // BANNER
+        //
+#if !EXTENSION
+        if let sceneIdentifier,
+           let windowScene = SceneManager.shared.getWindow(sceneIdentifier: sceneIdentifier)?.windowScene {
+            (banner, token) = showHudIndeterminateBanner(windowScene: windowScene, title: "_e2ee_encrypt_folder_")
+        }
+#endif
+
+        let resultsReadFileOrFolder = await NextcloudKit.shared.readFileOrFolderAsync(serverUrlFileName: serverUrlFileName, depth: "0", account: account) { task in
+            Task {
+                let identifier = await NCNetworking.shared.networkingTasks.createIdentifier(account: account,
+                                                                                            path: serverUrlFileName,
+                                                                                            name: "readFileOrFolder")
+                await NCNetworking.shared.networkingTasks.track(identifier: identifier, task: task)
+            }
+        }
+        guard resultsReadFileOrFolder.error == .success,
+              var file = resultsReadFileOrFolder.files?.first else {
+            error = resultsReadFileOrFolder.error
+            return error
+        }
+        let capabilities = await NKCapabilities.shared.getCapabilities(for: account)
+        let resultsMarkE2EEFolder = await NextcloudKit.shared.markE2EEFolderAsync(fileId: file.fileId, delete: false, account: account, options: NCNetworkingE2EE().getOptions(account: account, capabilities: capabilities)) { task in
+            Task {
+                let identifier = await NCNetworking.shared.networkingTasks.createIdentifier(account: account,
+                                                                                            path: file.fileId,
+                                                                                            name: "markE2EEFolder")
+                await NCNetworking.shared.networkingTasks.track(identifier: identifier, task: task)
+            }
+        }
+        guard resultsMarkE2EEFolder.error == .success else {
+            error = resultsMarkE2EEFolder.error
+            return error
+        }
 
         file.e2eEncrypted = true
-        guard let metadata = NCManageDatabase.shared.addMetadata(NCManageDatabase.shared.convertFileToMetadata(file, isDirectoryE2EE: false)) else {
-            return NKError(errorCode: NCGlobal.shared.errorUnexpectedResponseFromDB, errorDescription: "_e2e_error_")
-        }
-        NCManageDatabase.shared.addDirectory(e2eEncrypted: true, favorite: metadata.favorite, ocId: metadata.ocId, fileId: metadata.fileId, permissions: metadata.permissions, serverUrl: serverUrlFileName, account: metadata.account)
-        NCManageDatabase.shared.deleteE2eEncryption(predicate: NSPredicate(format: "account == %@ AND serverUrl == %@", metadata.account, serverUrlFileName))
-        if NCGlobal.shared.capabilityE2EEApiVersion == NCGlobal.shared.e2eeVersionV20 {
-            NCManageDatabase.shared.updateCounterE2eMetadata(account: account, ocIdServerUrl: metadata.ocId, counter: 0)
+
+        let metadata = await NCManageDatabaseCreateMetadata().convertFileToMetadataAsync(file)
+        await self.database.createDirectory(metadata: metadata)
+
+        await self.database.deleteE2eEncryptionAsync(predicate: NSPredicate(format: "account == %@ AND serverUrl == %@", metadata.account, serverUrlFileName))
+        await self.database.updateCounterE2eMetadataAsync(account: account, ocIdServerUrl: metadata.ocId, counter: 0)
+
+        // upload e2ee metadata
+        error = await NCNetworkingE2EE().createInitialMetadata(
+            serverUrl: serverUrlFileName,
+            account: account
+        )
+        guard error == .success else {
+            return error
         }
 
-        NotificationCenter.default.postOnMainThread(name: NCGlobal.shared.notificationCenterCreateFolder, userInfo: ["ocId": metadata.ocId, "serverUrl": serverUrl, "account": account, "withPush": true])
+        await NCNetworking.shared.transferDispatcher.notifyAllDelegates { delegate in
+            delegate.transferChange(networkingStatus: NCGlobal.shared.networkingStatusCreateFolder,
+                                    account: metadata.account,
+                                    fileName: metadata.fileName,
+                                    serverUrl: metadata.serverUrl,
+                                    selector: metadata.sessionSelector,
+                                    ocId: metadata.ocId,
+                                    destination: nil,
+                                    error: .success)
+        }
 
-        return NKError()
+        return error
     }
 }

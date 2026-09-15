@@ -1,10 +1,6 @@
-//
-//  NCPushNotification.swift
-//  Nextcloud
-//
-//  Created by Marino Faggiana on 26/06/24.
-//  Copyright © 2024 Marino Faggiana. All rights reserved.
-//
+// SPDX-FileCopyrightText: Nextcloud GmbH
+// SPDX-FileCopyrightText: 2024 Marino Faggiana
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 import Foundation
 import UIKit
@@ -13,27 +9,128 @@ import NextcloudKit
 
 class NCPushNotification {
     static let shared = NCPushNotification()
-    let keychain = NCKeychain()
-    var pushKitToken: String = ""
+    let global = NCGlobal.shared
 
-    func pushNotification() {
-        if pushKitToken.isEmpty { return }
-        for tblAccount in NCManageDatabase.shared.getAllAccount() {
-            let token = keychain.getPushNotificationToken(account: tblAccount.account)
-            if token != pushKitToken {
-                if token != nil {
-                    unsubscribingNextcloudServerPushNotification(account: tblAccount.account, urlBase: tblAccount.urlBase, user: tblAccount.user, withSubscribing: true)
-                } else {
-                    subscribingNextcloudServerPushNotification(account: tblAccount.account, urlBase: tblAccount.urlBase, user: tblAccount.user)
-                }
+    func subscribingNextcloudServerPushNotification(account: String, urlBase: String) async {
+        let preferences = NCPreferences()
+        let proxyServerUrl = NCBrandOptions.shared.pushNotificationServerProxy
+        guard !proxyServerUrl.isEmpty,
+              let pushTokenHash = NCEndToEndEncryption.shared().createSHA512(preferences.deviceTokenPushNotification) else {
+            return
+        }
+
+        var privateKey = preferences.getPushNotificationPrivateKey(account: account)
+        var publicKey = preferences.getPushNotificationPublicKey(account: account)
+
+        if privateKey == nil || publicKey == nil {
+            guard let keyPair = NCPushNotificationEncryption.shared().generatePushNotificationsKeyPair() else {
+                return
+            }
+            privateKey = keyPair.privateKey
+            publicKey = keyPair.publicKey
+
+            preferences.setPushNotificationPrivateKey(account: account, data: privateKey)
+            preferences.setPushNotificationPublicKey(account: account, data: publicKey)
+        }
+
+        guard privateKey != nil,
+              let publicKey,
+              let devicePublicKey = String(data: publicKey, encoding: .utf8) else {
+            return
+        }
+
+        let responsePN = await NextcloudKit.shared.subscribingPushNotificationAsync(serverUrl: urlBase,
+                                                                                    pushTokenHash: pushTokenHash,
+                                                                                    devicePublicKey: devicePublicKey,
+                                                                                    proxyServerUrl: proxyServerUrl, account: account) { task in
+            Task {
+                let identifier = await NCNetworking.shared.networkingTasks.createIdentifier(account: account,
+                                                                                            path: urlBase,
+                                                                                            name: "subscribingPushNotification")
+                await NCNetworking.shared.networkingTasks.track(identifier: identifier, task: task)
             }
         }
+
+        guard responsePN.error == .success,
+              let deviceIdentifier = responsePN.deviceIdentifier,
+              let signature = responsePN.signature,
+              let subscribingPublicKey = responsePN.publicKey
+        else {
+            nkLog(tag: self.global.logTagPN, emoji: .error, message: "Subscribed to Push Notification Server \(urlBase) with error \(responsePN.error.errorDescription)")
+            return
+        }
+
+        let userAgent = String(format: "%@  (Strict VoIP)", NCBrandOptions.shared.getUserAgent())
+        let options = NKRequestOptions(customUserAgent: userAgent)
+
+        let responsePushProxy = await NextcloudKit.shared.subscribingPushProxyAsync(proxyServerUrl: proxyServerUrl,
+                                                                                    pushToken: preferences.deviceTokenPushNotification,
+                                                                                    deviceIdentifier: deviceIdentifier,
+                                                                                    signature: signature,
+                                                                                    publicKey: subscribingPublicKey,
+                                                                                    account: account,
+                                                                                    options: options, taskHandler: { task in
+            Task {
+                let identifier = await NCNetworking.shared.networkingTasks.createIdentifier(account: account,
+                                                                                            path: proxyServerUrl,
+                                                                                            name: "subscribingPushProxy")
+                await NCNetworking.shared.networkingTasks.track(identifier: identifier, task: task)
+            }
+        })
+
+        guard responsePushProxy.error == .success else {
+            nkLog(tag: self.global.logTagPN, emoji: .error, message: "Subscribed to Push Notification Server Proxy \(proxyServerUrl) with error \(responsePushProxy.error.errorDescription)")
+            return
+        }
+
+        preferences.setPushNotificationDeviceIdentifier(account: account, deviceIdentifier: deviceIdentifier)
+        preferences.setPushNotificationDeviceIdentifierSignature(account: account, deviceIdentifierSignature: signature)
+        preferences.setPushNotificationSubscribingPublicKey(account: account, publicKey: subscribingPublicKey)
+    }
+
+    func unsubscribingNextcloudServerPushNotification(account: String, urlBase: String) async {
+        let preferences = NCPreferences()
+        guard let deviceIdentifier = preferences.getPushNotificationDeviceIdentifier(account: account),
+              let signature = preferences.getPushNotificationDeviceIdentifierSignature(account: account),
+              let subscribingPublicKey = preferences.getPushNotificationSubscribingPublicKey(account: account) else {
+            return
+        }
+
+        let responsePN = await NextcloudKit.shared.unsubscribingPushNotificationAsync(serverUrl: urlBase,
+                                                                                      account: account) { task in
+            Task {
+                let identifier = await NCNetworking.shared.networkingTasks.createIdentifier(account: account,
+                                                                                            path: urlBase,
+                                                                                            name: "unsubscribingPushNotification")
+                await NCNetworking.shared.networkingTasks.track(identifier: identifier, task: task)
+            }
+        }
+
+        let userAgent = String(format: "%@  (Strict VoIP)", NCBrandOptions.shared.getUserAgent())
+        let options = NKRequestOptions(customUserAgent: userAgent)
+        let proxyServerUrl = NCBrandOptions.shared.pushNotificationServerProxy
+        let responseProxy = await NextcloudKit.shared.unsubscribingPushProxyAsync(proxyServerUrl: proxyServerUrl,
+                                                                                  deviceIdentifier: deviceIdentifier,
+                                                                                  signature: signature,
+                                                                                  publicKey: subscribingPublicKey,
+                                                                                  account: account,
+                                                                                  options: options) { task in
+            Task {
+                let identifier = await NCNetworking.shared.networkingTasks.createIdentifier(account: account,
+                                                                                            path: NCBrandOptions.shared.pushNotificationServerProxy,
+                                                                                            name: "unsubscribingPushProxy")
+                await NCNetworking.shared.networkingTasks.track(identifier: identifier, task: task)
+            }
+        }
+
+        nkLog(tag: self.global.logTagPN, emoji: .info, message: "Unsubscribed to Push Notification Server \(urlBase) with error \(responsePN.error.errorDescription)")
+        nkLog(tag: self.global.logTagPN, emoji: .info, message: "Unsubscribed to Push Notification Server Proxy \(proxyServerUrl) with error \(responseProxy.error.errorDescription)")
     }
 
     func applicationdidReceiveRemoteNotification(userInfo: [AnyHashable: Any], completion: @escaping (_ result: UIBackgroundFetchResult) -> Void) {
         if let message = userInfo["subject"] as? String {
-            for tblAccount in NCManageDatabase.shared.getAllAccount() {
-                if let privateKey = keychain.getPushNotificationPrivateKey(account: tblAccount.account),
+            for tblAccount in NCManageDatabase.shared.getAllTableAccount() {
+                if let privateKey = NCPreferences().getPushNotificationPrivateKey(account: tblAccount.account),
                    let decryptedMessage = NCPushNotificationEncryption.shared().decryptPushNotification(message, withDevicePrivateKey: privateKey),
                    let jsonData = decryptedMessage.data(using: .utf8) {
                     do {
@@ -47,72 +144,15 @@ class NCPushNotification {
                                 cleanAllNotifications()
                             }
                         } else {
-                            print("Failed to convert JSON data to dictionary.")
+                            nkLog(tag: self.global.logTagPN, emoji: .error, message: "Failed to convert JSON data dictionary.")
                         }
                     } catch {
-                        print("Error parsing")
+                        nkLog(tag: self.global.logTagPN, emoji: .error, message: "Failed to parsing JSON data dictionary.")
                     }
                 }
             }
         }
         completion(UIBackgroundFetchResult.noData)
-    }
-
-    func subscribingNextcloudServerPushNotification(account: String, urlBase: String, user: String) {
-        if pushKitToken.isEmpty { return }
-
-        NCPushNotificationEncryption.shared().generatePushNotificationsKeyPair(account)
-        guard let pushTokenHash = NCEndToEndEncryption.shared().createSHA512(pushKitToken),
-              let pushPublicKey = keychain.getPushNotificationPublicKey(account: account),
-              let pushDevicePublicKey = String(data: pushPublicKey, encoding: .utf8)  else { return }
-        let proxyServerPath = NCBrandOptions.shared.pushNotificationServerProxy
-
-        NextcloudKit.shared.subscribingPushNotification(serverUrl: urlBase, account: account, user: user, password: keychain.getPassword(account: account), pushTokenHash: pushTokenHash, devicePublicKey: pushDevicePublicKey, proxyServerUrl: proxyServerPath) { account, deviceIdentifier, signature, publicKey, _, error in
-            if error == .success, let deviceIdentifier, let signature, let publicKey {
-                let userAgent = String(format: "%@  (Strict VoIP)", NCBrandOptions.shared.getUserAgent())
-                let options = NKRequestOptions(customUserAgent: userAgent)
-
-                NextcloudKit.shared.subscribingPushProxy(proxyServerUrl: proxyServerPath, pushToken: self.pushKitToken, deviceIdentifier: deviceIdentifier, signature: signature, publicKey: publicKey, options: options) { error in
-                    if error == .success {
-                        NextcloudKit.shared.nkCommonInstance.writeLog("[INFO] Subscribed to Push Notification server & proxy successfully")
-                        self.keychain.setPushNotificationToken(account: account, token: self.pushKitToken)
-                        self.keychain.setPushNotificationDeviceIdentifier(account: account, deviceIdentifier: deviceIdentifier)
-                        self.keychain.setPushNotificationDeviceIdentifierSignature(account: account, deviceIdentifierSignature: signature)
-                        self.keychain.setPushNotificationSubscribingPublicKey(account: account, publicKey: publicKey)
-                    }
-                }
-            }
-        }
-    }
-
-    func unsubscribingNextcloudServerPushNotification(account: String, urlBase: String, user: String, withSubscribing subscribing: Bool) {
-        guard let deviceIdentifier = keychain.getPushNotificationDeviceIdentifier(account: account),
-              let signature = keychain.getPushNotificationDeviceIdentifierSignature(account: account),
-              let publicKey = keychain.getPushNotificationSubscribingPublicKey(account: account) else { return }
-
-        NextcloudKit.shared.unsubscribingPushNotification(serverUrl: urlBase, account: account, user: user, password: keychain.getPassword(account: account)) { _, error in
-            if error == .success {
-                let proxyServerPath = NCBrandOptions.shared.pushNotificationServerProxy
-                let userAgent = String(format: "%@  (Strict VoIP)", NCBrandOptions.shared.getUserAgent())
-                let options = NKRequestOptions(customUserAgent: userAgent)
-
-                NextcloudKit.shared.unsubscribingPushProxy(proxyServerUrl: proxyServerPath, deviceIdentifier: deviceIdentifier, signature: signature, publicKey: publicKey, options: options) { error in
-                    if error == .success {
-                        NextcloudKit.shared.nkCommonInstance.writeLog("[INFO] Unsubscribed to Push Notification server & proxy successfully")
-                        self.keychain.setPushNotificationPublicKey(account: account, data: nil)
-                        self.keychain.setPushNotificationSubscribingPublicKey(account: account, publicKey: nil)
-                        self.keychain.setPushNotificationPrivateKey(account: account, data: nil)
-                        self.keychain.setPushNotificationToken(account: account, token: nil)
-                        self.keychain.setPushNotificationDeviceIdentifier(account: account, deviceIdentifier: nil)
-                        self.keychain.setPushNotificationDeviceIdentifierSignature(account: account, deviceIdentifierSignature: nil)
-
-                        if !self.pushKitToken.isEmpty && subscribing {
-                            self.subscribingNextcloudServerPushNotification(account: account, urlBase: urlBase, user: user)
-                        }
-                    }
-                }
-            }
-        }
     }
 
     func removeNotificationWithNotificationId(_ notificationId: Int, usingDecryptionKey key: Data) {
@@ -129,10 +169,10 @@ class NCPushNotification {
                                 UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [request.identifier])
                             }
                         } else {
-                            print("Failed to convert JSON data to dictionary.")
+                            nkLog(tag: self.global.logTagPN, emoji: .error, message: "Failed to convert JSON data dictionary.")
                         }
                     } catch {
-                        print("Error parsing")
+                        nkLog(tag: self.global.logTagPN, emoji: .error, message: "Failed to parsing JSON data dictionary.")
                     }
                 }
             }
@@ -150,19 +190,14 @@ class NCPushNotification {
                                 UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [notification.request.identifier])
                             }
                         } else {
-                            print("Failed to convert JSON data to dictionary.")
+                            nkLog(tag: self.global.logTagPN, emoji: .error, message: "Failed to convert JSON data dictionary.")
                         }
                     } catch {
-                        print("Error parsing")
+                        nkLog(tag: self.global.logTagPN, emoji: .error, message: "Failed to parsing JSON data dictionary.")
                     }
                 }
             }
         }
-    }
-
-    func registerForRemoteNotificationsWithDeviceToken(_ deviceToken: Data) {
-        self.pushKitToken = NCPushNotificationEncryption.shared().string(withDeviceToken: deviceToken)
-        pushNotification()
     }
 
     func cleanAllNotifications() {

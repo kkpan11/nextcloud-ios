@@ -1,23 +1,9 @@
-//
-//  NCMediaLayout.swift
-//
+// SPDX-FileCopyrightText: Nextcloud GmbH
+// SPDX-FileCopyrightText: 2024 Marino Faggiana
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //  Created by Marino Faggiana on 26/02/24.
 //  Based on CHTCollectionViewWaterfallLayout by Nelson Tai
-//  Copyright © 2024 Marino Faggiana. All rights reserved.
-//
-//  This program is free software: you can redistribute it and/or modify
-//  it under the terms of the GNU General Public License as published by
-//  the Free Software Foundation, either version 3 of the License, or
-//  (at your option) any later version.
-//
-//  This program is distributed in the hope that it will be useful,
-//  but WITHOUT ANY WARRANTY; without even the implied warranty of
-//  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-//  GNU General Public License for more details.
-//
-//  You should have received a copy of the GNU General Public License
-//  along with this program.  If not, see <http://www.gnu.org/licenses/>.
-//
 
 import UIKit
 
@@ -25,7 +11,7 @@ public let mediaSectionHeader = "mediaSectionHeader"
 public let mediaSectionFooter = "mediaSectionFooter"
 
 protocol NCMediaLayoutDelegate: UICollectionViewDelegate {
-    func collectionView(_ collectionView: UICollectionView, layout: UICollectionViewLayout, sizeForItemAtIndexPath indexPath: NSIndexPath, columnCount: Int, typeLayout: String) -> CGSize
+    func collectionView(_ collectionView: UICollectionView, layout: UICollectionViewLayout, sizeForItemAtIndexPath indexPath: IndexPath, columnCount: Int, typeLayout: String) -> CGSize
     func collectionView(_ collectionView: UICollectionView, layout: UICollectionViewLayout, heightForHeaderInSection section: Int) -> Float
     func collectionView(_ collectionView: UICollectionView, layout: UICollectionViewLayout, heightForFooterInSection section: Int) -> Float
     func collectionView(_ collectionView: UICollectionView, layout: UICollectionViewLayout, insetForSection section: Int) -> UIEdgeInsets
@@ -43,11 +29,7 @@ public class NCMediaLayout: UICollectionViewLayout {
     private let unionSize = 20
 
     // MARK: - Public Properties
-    public var columnCount: Int = 0 {
-        didSet {
-            invalidateIfNotEqual(oldValue, newValue: columnCount)
-        }
-    }
+    public private(set) var columnCount: Int = 1
     public var minimumColumnSpacing: Float = 1.0 {
         didSet {
             invalidateIfNotEqual(oldValue, newValue: minimumColumnSpacing)
@@ -84,14 +66,21 @@ public class NCMediaLayout: UICollectionViewLayout {
         }
     }
     public override var collectionViewContentSize: CGSize {
-        let numberOfSections = collectionView?.numberOfSections
-        if numberOfSections == 0 {
-            return CGSize.zero
+        guard let collectionView else {
+            return .zero
         }
-        var contentSize = collectionView?.bounds.size
 
-        contentSize?.height = CGFloat(columnHeights[0])
-        return contentSize!
+        return CGSize(
+            width: collectionView.bounds.width,
+            height: CGFloat(columnHeights.max() ?? 0)
+        )
+    }
+    public var frameWidth: Float = 0
+    public var itemWidth: Float = 0
+    public var overlaysSectionHeader = false {
+        didSet {
+            invalidateIfNotEqual(oldValue, newValue: overlaysSectionHeader)
+        }
     }
 
     // MARK: - Private Properties
@@ -113,11 +102,10 @@ public class NCMediaLayout: UICollectionViewLayout {
               let collectionView = collectionView,
               let delegate = delegate else { return }
 
-        columnCount = delegate.getColumnCount()
-        (delegate as? NCMedia)?.buildMediaPhotoVideo(columnCount: columnCount)
-        if UIDevice.current.userInterfaceIdiom == .phone,
-           (UIDevice.current.orientation == .landscapeLeft || UIDevice.current.orientation == .landscapeRight) {
-            columnCount += 2
+        let resolvedColumnCount = max(1, delegate.getColumnCount())
+
+        if columnCount != resolvedColumnCount {
+            columnCount = resolvedColumnCount
         }
 
         // Initialize variables
@@ -142,28 +130,55 @@ public class NCMediaLayout: UICollectionViewLayout {
             */
             let minimumInteritemSpacing: Float = delegate.collectionView(collectionView, layout: self, minimumInteritemSpacingForSection: section)
             let sectionInset: UIEdgeInsets = delegate.collectionView(collectionView, layout: self, insetForSection: section)
-            let width = Float(collectionView.frame.size.width - sectionInset.left - sectionInset.right)
-            let itemWidth = floorf((width - Float(columnCount - 1) * Float(minimumColumnSpacing)) / Float(columnCount))
+            frameWidth = Float(collectionView.bounds.width - sectionInset.left - sectionInset.right)
+            itemWidth = ((frameWidth - Float(columnCount - 1) * Float(minimumColumnSpacing)) / Float(columnCount))
 
             /*
             * 2. Section header
             */
-            let headerHeight: Float = delegate.collectionView(collectionView, layout: self, heightForHeaderInSection: section)
-            let headerInset: UIEdgeInsets = delegate.collectionView(collectionView, layout: self, insetForHeaderInSection: section)
+            let headerHeight = delegate.collectionView(
+                collectionView,
+                layout: self,
+                heightForHeaderInSection: section
+            )
 
-            top += Float(headerInset.top)
+            let headerInset = delegate.collectionView(
+                collectionView,
+                layout: self,
+                insetForHeaderInSection: section
+            )
 
             if headerHeight > 0 {
-                attributes = UICollectionViewLayoutAttributes(forSupplementaryViewOfKind: mediaSectionHeader, with: NSIndexPath(item: 0, section: section) as IndexPath)
-                attributes.frame = CGRect(x: headerInset.left, y: CGFloat(top), width: collectionView.frame.size.width - (headerInset.left + headerInset.right), height: CGFloat(headerHeight))
+                if !overlaysSectionHeader {
+                    top += Float(headerInset.top)
+                }
+
+                attributes = UICollectionViewLayoutAttributes(
+                    forSupplementaryViewOfKind: mediaSectionHeader,
+                    with: IndexPath(item: 0, section: section)
+                )
+
+                attributes.frame = CGRect(
+                    x: headerInset.left,
+                    y: CGFloat(top + (overlaysSectionHeader ? Float(headerInset.top) : 0)),
+                    width: collectionView.bounds.width - headerInset.left - headerInset.right,
+                    height: CGFloat(headerHeight)
+                )
+
+                if overlaysSectionHeader {
+                    attributes.zIndex = 1_000
+                } else {
+                    top = Float(attributes.frame.maxY) + Float(headerInset.bottom)
+                }
 
                 headersAttribute[section] = attributes
                 allItemAttributes.append(attributes)
-
-                top = Float(attributes.frame.maxY) + Float(headerInset.bottom)
             }
 
-            top += Float(sectionInset.top)
+            if !overlaysSectionHeader {
+                top += Float(sectionInset.top)
+            }
+
             for idx in 0..<columnCount {
                 columnHeights[idx] = top
             }
@@ -176,10 +191,18 @@ public class NCMediaLayout: UICollectionViewLayout {
 
             // Item will be put into shortest column.
             for idx in 0..<itemCount {
-                let indexPath = NSIndexPath(item: idx, section: section)
+                let indexPath = IndexPath(item: idx, section: section)
                 let columnIndex = shortestColumnIndex()
+                let xOffset: Float
 
-                let xOffset = Float(sectionInset.left) + Float(itemWidth + minimumColumnSpacing) * Float(columnIndex)
+                if UIView.userInterfaceLayoutDirection(for: collectionView.semanticContentAttribute) == .leftToRight {
+                    xOffset = Float(sectionInset.left) + Float(itemWidth + minimumColumnSpacing) * Float(columnIndex)
+                } else {
+                    xOffset = Float(collectionView.bounds.width)
+                        - Float(sectionInset.right)
+                        - Float(itemWidth + minimumColumnSpacing) * Float(columnIndex + 1)
+                }
+
                 let yOffset = columnHeights[columnIndex]
                 let typeLayout = delegate.getLayout() ?? NCGlobal.shared.mediaLayoutRatio
                 let itemSize = delegate.collectionView(collectionView, layout: self, sizeForItemAtIndexPath: indexPath, columnCount: self.columnCount, typeLayout: typeLayout)
@@ -201,13 +224,30 @@ public class NCMediaLayout: UICollectionViewLayout {
             * 4. Section footer
             */
             let columnIndex = longestColumnIndex()
-            top = columnHeights[columnIndex] - minimumInteritemSpacing + Float(sectionInset.bottom)
+            top = columnHeights[columnIndex]
+
+            if itemCount > 0 {
+                top -= minimumInteritemSpacing
+            }
+
+            top += Float(sectionInset.bottom)
+            let footerInset = delegate.collectionView(
+                collectionView,
+                layout: self,
+                insetForFooterInSection: section
+            )
+
             top += Float(footerInset.top)
-            let footerHeight = delegate.collectionView(collectionView, layout: self, heightForFooterInSection: section)
+
+            let footerHeight = delegate.collectionView(
+                collectionView,
+                layout: self,
+                heightForFooterInSection: section
+            )
 
             if footerHeight > 0 {
                 attributes = UICollectionViewLayoutAttributes(forSupplementaryViewOfKind: mediaSectionFooter, with: NSIndexPath(item: 0, section: section) as IndexPath)
-                attributes.frame = CGRect(x: footerInset.left, y: CGFloat(top), width: collectionView.frame.size.width - (footerInset.left + footerInset.right), height: CGFloat(footerHeight))
+                attributes.frame = CGRect(x: footerInset.left, y: CGFloat(top), width: collectionView.bounds.width - (footerInset.left + footerInset.right), height: CGFloat(footerHeight))
 
                 footersAttribute[section] = attributes
                 allItemAttributes.append(attributes)
@@ -221,15 +261,24 @@ public class NCMediaLayout: UICollectionViewLayout {
         }
 
         // Build union rects
-        var idx = 0
-        let itemCounts = allItemAttributes.count
+        unionRects.removeAll(keepingCapacity: true)
 
-        while idx < itemCounts {
-            let rect1 = allItemAttributes[idx].frame
-            idx = min(idx + unionSize, itemCounts) - 1
-            let rect2 = allItemAttributes[idx].frame
-            unionRects.append(rect1.union(rect2))
-            idx += 1
+        var startIndex = 0
+
+        while startIndex < allItemAttributes.count {
+            let endIndex = min(
+                startIndex + unionSize,
+                allItemAttributes.count
+            )
+
+            var unionRect = allItemAttributes[startIndex].frame
+
+            for index in (startIndex + 1)..<endIndex {
+                unionRect = unionRect.union(allItemAttributes[index].frame)
+            }
+
+            unionRects.append(unionRect)
+            startIndex = endIndex
         }
     }
 
@@ -295,7 +344,7 @@ public class NCMediaLayout: UICollectionViewLayout {
 }
 
 // MARK: - Private Methods
-private extension NCMediaLayout {
+extension NCMediaLayout {
     func shortestColumnIndex() -> Int {
         var index: Int = 0
         var shortestHeight = MAXFLOAT

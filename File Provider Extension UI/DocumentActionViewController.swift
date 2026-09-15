@@ -32,9 +32,9 @@ class DocumentActionViewController: FPUIActionExtensionViewController {
     override func loadView() {
         super.loadView()
 
-        view.backgroundColor = NCBrandColor.shared.brandElement
-        titleError.textColor = NCBrandColor.shared.brandText
-        cancelButton.setTitleColor(NCBrandColor.shared.brandText, for: .normal)
+        view.backgroundColor = NCBrandColor.shared.customer
+        titleError.textColor = NCBrandColor.shared.customerText
+        cancelButton.setTitleColor(NCBrandColor.shared.customerText, for: .normal)
 
         titleError.text = ""
     }
@@ -48,6 +48,8 @@ class DocumentActionViewController: FPUIActionExtensionViewController {
                 titleError?.text = NSLocalizedString("_unauthorizedFilesPasscode_", comment: "")
             } else if code == NCGlobal.shared.errorDisableFilesApp {
                 titleError?.text = NSLocalizedString("_disableFilesApp_", comment: "")
+            } else if code == NCGlobal.shared.errorVersionMismatch {
+                titleError?.text = NSLocalizedString("_version_mismatch_error_", comment: "")
             }
         } else {
             titleError?.text = error.localizedDescription

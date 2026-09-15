@@ -25,15 +25,22 @@
 import UIKit
 import NextcloudKit
 import SwiftyJSON
-import JGProgressHUD
 
 class NCNotification: UITableViewController, NCNotificationCellDelegate {
-
-    let appDelegate = (UIApplication.shared.delegate as? AppDelegate)!
     let utilityFileSystem = NCUtilityFileSystem()
     let utility = NCUtility()
     var notifications: [NKNotifications] = []
-    var dataSourceTask: URLSessionTask?
+    var session: NCSession.Session!
+
+    @MainActor
+    var controller: NCMainTabBarController? {
+        self.tabBarController as? NCMainTabBarController
+    }
+
+    @MainActor
+    internal var windowScene: UIWindowScene? {
+        SceneManager.shared.getWindowScene(controller: self.tabBarController as? NCMainTabBarController)
+    }
 
     // MARK: - View Life Cycle
 
@@ -43,37 +50,44 @@ class NCNotification: UITableViewController, NCNotificationCellDelegate {
         title = NSLocalizedString("_notifications_", comment: "")
         view.backgroundColor = .systemBackground
 
+        navigationController?.setNavigationBarAppearance()
+
         tableView.tableFooterView = UIView()
         tableView.rowHeight = UITableView.automaticDimension
         tableView.estimatedRowHeight = 50.0
         tableView.backgroundColor = .systemBackground
 
-        refreshControl?.addTarget(self, action: #selector(getNetwokingNotification), for: .valueChanged)
-
-        // Navigation controller is being presented modally
-        if navigationController?.presentingViewController != nil {
-            navigationItem.leftBarButtonItem = UIBarButtonItem(title: NSLocalizedString("_cancel_", comment: ""), style: .plain, action: { [weak self] in
-                self?.dismiss(animated: true)
-            })
+        refreshControl?.action(for: .valueChanged) { _ in
+            Task {
+                await self.getNetwokingNotification()
+            }
         }
-    }
 
-    override func viewWillAppear(_ animated: Bool) {
-        super.viewWillAppear(animated)
-        navigationController?.setNavigationBarAppearance()
+        let close = UIBarButtonItem(
+            image: UIImage(systemName: "xmark"),
+            style: .plain,
+            target: self,
+            action: #selector(viewClose)
+        )
+        close.accessibilityLabel = NSLocalizedString("_close_", comment: "")
+
+        navigationItem.rightBarButtonItem = close
     }
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
 
-        getNetwokingNotification()
+        Task {
+            await getNetwokingNotification()
+        }
     }
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
 
-        // Cancel Queue & Retrieves Properties
-        dataSourceTask?.cancel()
+        Task {
+            await NCNetworking.shared.networkingTasks.cancel(identifier: "NCNotification")
+        }
     }
 
     @objc func viewClose() {
@@ -87,8 +101,7 @@ class NCNotification: UITableViewController, NCNotificationCellDelegate {
     }
 
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
-
-        guard let notification = NCApplicationHandle().didSelectNotification(notifications[indexPath.row], viewController: self) else { return }
+        let notification = notifications[indexPath.row]
 
         do {
             if let subjectRichParameters = notification.subjectRichParameters,
@@ -96,7 +109,9 @@ class NCNotification: UITableViewController, NCNotificationCellDelegate {
                let file = json["file"] as? [String: Any],
                file["type"] as? String == "file" {
                 if let id = file["id"] {
-                    NCActionCenter.shared.viewerFile(account: appDelegate.account, fileId: ("\(id)"), viewController: self)
+                    Task {
+                        await NCNetworking.shared.viewerFile(account: session.account, fileId: ("\(id)"), viewController: self)
+                    }
                 }
             }
         } catch {
@@ -105,13 +120,13 @@ class NCNotification: UITableViewController, NCNotificationCellDelegate {
     }
 
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
-
         guard let cell = self.tableView.dequeueReusableCell(withIdentifier: "Cell", for: indexPath) as? NCNotificationCell else { return UITableViewCell() }
-        cell.delegate = self
-        cell.selectionStyle = .none
-        cell.indexPath = indexPath
 
         let notification = notifications[indexPath.row]
+        cell.delegate = self
+        cell.selectionStyle = .none
+        cell.identifier = notification.idNotification
+
         let urlIcon = URL(string: notification.icon)
         var image: UIImage?
 
@@ -121,7 +136,8 @@ class NCNotification: UITableViewController, NCNotificationCellDelegate {
         }
 
         if let image = image {
-            cell.icon.image = image.withTintColor(NCBrandColor.shared.brandElement, renderingMode: .alwaysOriginal)
+            cell.icon.contentMode = .scaleAspectFit
+            cell.icon.image = image.withTintColor(NCBrandColor.shared.getElement(account: session.account), renderingMode: .alwaysOriginal)
         }
 
         // Avatar
@@ -133,20 +149,47 @@ class NCNotification: UITableViewController, NCNotificationCellDelegate {
             cell.avatar.isHidden = false
             cell.avatarLeadingMargin.constant = 50
 
-            let fileName = appDelegate.userBaseUrl + "-" + user + ".png"
-            let fileNameLocalPath = utilityFileSystem.directoryUserData + "/" + fileName
-
+            let fileName = NCSession.shared.getFileName(urlBase: session.urlBase, user: user)
+            let fileNameLocalPath = self.utilityFileSystem.createServerUrl(serverUrl: utilityFileSystem.directoryUserData, fileName: fileName)
             if let image = UIImage(contentsOfFile: fileNameLocalPath) {
-                cell.avatar.image = image
-            } else if !FileManager.default.fileExists(atPath: fileNameLocalPath) {
-                cell.fileUser = user
-                NCNetworking.shared.downloadAvatar(user: user, dispalyName: json["user"]?["name"].string, fileName: fileName, cell: cell, view: tableView)
+                cell.avatar?.image = image
+            }
+            let account = session.account
+            let identifier = notification.idNotification
+
+            Task {
+                let etagResource = await NCManageDatabase.shared.getTableAvatarAsync(fileName: fileName)?.etag
+                await NCTransferCoordinator.shared.start(identifier: fileName,
+                                                         priority: .userInitiated) {
+                    let results = await NextcloudKit.shared.downloadAvatarAsync(
+                        user: user,
+                        fileNameLocalPath: fileNameLocalPath,
+                        sizeImage: NCGlobal.shared.avatarSize,
+                        avatarSizeRounded: NCGlobal.shared.avatarSizeRounded,
+                        etagResource: etagResource,
+                        account: account)
+
+                    if results.error == .success,
+                       let image = results.imageAvatar,
+                       let etag = results.etag,
+                       etag != etagResource {
+                        await NCManageDatabase.shared.addAvatarAsync(fileName: fileName, etag: etag)
+                        await MainActor.run {
+                            guard
+                                let cell = self.tableView.cellForRow(at: indexPath) as? NCNotificationCell,
+                                cell.identifier == identifier else {
+                                return
+                            }
+                            cell.avatar?.image = image
+                        }
+                    }
+                }
             }
         }
 
         cell.date.text = DateFormatter.localizedString(from: notification.date as Date, dateStyle: .medium, timeStyle: .medium)
         cell.notification = notification
-        cell.date.text = utility.dateDiff(notification.date as Date)
+        cell.date.text = utility.getRelativeDateTitle(notification.date as Date)
         cell.date.textColor = NCBrandColor.shared.iconImageColor2
         cell.subject.text = notification.subject
         cell.subject.textColor = NCBrandColor.shared.textColor
@@ -160,16 +203,16 @@ class NCNotification: UITableViewController, NCNotificationCellDelegate {
         cell.primary.titleLabel?.font = .systemFont(ofSize: 15)
         cell.primary.layer.cornerRadius = 15
         cell.primary.layer.masksToBounds = true
-        cell.primary.layer.backgroundColor = NCBrandColor.shared.brandElement.cgColor
-        cell.primary.setTitleColor(NCBrandColor.shared.brandText, for: .normal)
+        cell.primary.layer.backgroundColor = NCBrandColor.shared.getElement(account: session.account).cgColor
+        cell.primary.setTitleColor(.white, for: .normal)
 
         cell.more.isEnabled = false
         cell.more.isHidden = true
         cell.more.titleLabel?.font = .systemFont(ofSize: 15)
         cell.more.layer.cornerRadius = 15
         cell.more.layer.masksToBounds = true
-        cell.more.layer.backgroundColor = NCBrandColor.shared.brandElement.cgColor
-        cell.more.setTitleColor(NCBrandColor.shared.brandText, for: .normal)
+        cell.more.layer.backgroundColor = NCBrandColor.shared.getElement(account: session.account).cgColor
+        cell.more.setTitleColor(.white, for: .normal)
 
         cell.secondary.isEnabled = false
         cell.secondary.isHidden = true
@@ -215,6 +258,13 @@ class NCNotification: UITableViewController, NCNotificationCellDelegate {
                 cell.more.isEnabled = true
                 cell.more.isHidden = false
                 cell.more.setTitle("…", for: .normal)
+
+                let contextMenu = NCContextMenuNotification(
+                    notification: notification,
+                    delegate: self
+                )
+                cell.more.menu = contextMenu.viewMenu()
+                cell.more.showsMenuAsPrimaryAction = true
             }
 
             var buttonWidth = max(cell.primary.intrinsicContentSize.width, cell.secondary.intrinsicContentSize.width)
@@ -228,93 +278,116 @@ class NCNotification: UITableViewController, NCNotificationCellDelegate {
 
     // MARK: - tap Action
 
-    func tapRemove(with notification: NKNotifications) {
-
-        NextcloudKit.shared.setNotification(serverUrl: nil, idNotification: notification.idNotification, method: "DELETE") { account, error in
-            if error == .success && account == self.appDelegate.account {
+    func tapRemove(with notification: NKNotifications, sender: Any?) {
+        NextcloudKit.shared.setNotification(serverUrl: nil, idNotification: notification.idNotification, method: "DELETE", account: session.account) { task in
+            Task {
+                let identifier = await NCNetworking.shared.networkingTasks.createIdentifier(account: self.session.account,
+                                                                                            path: "\(notification.idNotification)",
+                                                                                            name: "setNotification")
+                await NCNetworking.shared.networkingTasks.track(identifier: identifier, task: task)
+            }
+        } completion: { _, _, error in
+            if error == .success {
                 if let index = self.notifications
                     .firstIndex(where: { $0.idNotification == notification.idNotification }) {
                     self.notifications.remove(at: index)
                 }
                 self.tableView.reloadData()
             } else if error != .success {
-                NCContentPresenter().showError(error: error)
+                Task {
+                    await showErrorBanner(windowScene: self.windowScene, text: error.errorDescription, errorCode: error.errorCode)
+                }
             } else {
                 print("[Error] The user has been changed during networking process.")
             }
         }
     }
 
-    func tapAction(with notification: NKNotifications, label: String) {
-        if notification.app == NCGlobal.shared.spreedName,
-           let roomToken = notification.objectId.split(separator: "/").first,
-           let talkUrl = URL(string: "nextcloudtalk://open-conversation?server=\(appDelegate.urlBase)&user=\(appDelegate.userId)&withRoomToken=\(roomToken)"),
-           UIApplication.shared.canOpenURL(talkUrl) {
-            UIApplication.shared.open(talkUrl)
-        } else if let actions = notification.actions,
-                  let jsonActions = JSON(actions).array,
-                  let action = jsonActions.first(where: { $0["label"].string == label }) {
-                      let serverUrl = action["link"].stringValue
-            let method = action["type"].stringValue
+    func tapAction(with notification: NKNotifications, label: String, sender: Any?) {
+        guard let actions = notification.actions,
+              let jsonActions = JSON(actions).array,
+              let action = jsonActions.first(where: { $0["label"].string == label })
+        else { return }
 
-            if method == "WEB", let url = action["link"].url {
-                UIApplication.shared.open(url, options: [:], completionHandler: nil)
-                return
+        let serverUrl = action["link"].stringValue
+        let method = action["type"].stringValue
+
+        if method == "WEB", var url = action["link"].url {
+            if notification.app == NCGlobal.shared.spreedName,
+               let roomToken = notification.objectId.split(separator: "/").first,
+               let talkUrl = URL(string: "nextcloudtalk://open-conversation?server=\(session.urlBase)&user=\(session.userId)&withRoomToken=\(roomToken)"),
+               UIApplication.shared.canOpenURL(talkUrl) {
+
+                url = talkUrl
             }
 
-            NextcloudKit.shared.setNotification(serverUrl: serverUrl, idNotification: 0, method: method) { account, error in
-                if error == .success && account == self.appDelegate.account {
-                    if let index = self.notifications.firstIndex(where: { $0.idNotification == notification.idNotification }) {
-                        self.notifications.remove(at: index)
-                    }
-                    self.tableView.reloadData()
-                    if self.navigationController?.presentingViewController != nil, notification.app == NCGlobal.shared.twoFactorNotificatioName {
-                        self.dismiss(animated: true)
-                    }
-                } else if error != .success {
-                    NCContentPresenter().showError(error: error)
-                } else {
-                    print("[Error] The user has been changed during networking process.")
+            UIApplication.shared.open(url)
+            return
+        }
+
+        NextcloudKit.shared.setNotification(serverUrl: serverUrl, idNotification: 0, method: method, account: session.account) { task in
+            Task {
+                let identifier = await NCNetworking.shared.networkingTasks.createIdentifier(account: self.session.account,
+                                                                                            name: "setNotification")
+                await NCNetworking.shared.networkingTasks.track(identifier: identifier, task: task)
+            }
+        } completion: { _, _, error in
+            if error == .success {
+                if let index = self.notifications.firstIndex(where: { $0.idNotification == notification.idNotification }) {
+                    self.notifications.remove(at: index)
                 }
-
+                self.tableView.reloadData()
+                if self.navigationController?.presentingViewController != nil, notification.app == NCGlobal.shared.twoFactorNotificatioName {
+                    self.dismiss(animated: true)
+                }
+            } else if error != .success {
+                Task {
+                    await showErrorBanner(windowScene: self.windowScene, text: error.errorDescription, errorCode: error.errorCode)
+                }
+            } else {
+                print("[Error] The user has been changed during networking process.")
             }
-        } // else: Action not found
-    }
-
-    func tapMore(with notification: NKNotifications) {
-       toggleMenu(notification: notification)
+        }
     }
 
     // MARK: - Load notification networking
 
-   @objc func getNetwokingNotification() {
+    @MainActor
+    func getNetwokingNotification() async {
+        // If is already in-flight, do nothing
+        if await NCNetworking.shared.networkingTasks.isReading(identifier: "NCNotification") {
+            return
+        }
 
-       self.tableView.reloadData()
-       NextcloudKit.shared.getNotifications { task in
-           self.dataSourceTask = task
-           self.tableView.reloadData()
-       } completion: { account, notifications, _, error in
-           if error == .success, account == self.appDelegate.account, let notifications = notifications {
-               self.notifications.removeAll()
-               let sortedNotifications = notifications.sorted { $0.date > $1.date }
-               for notification in sortedNotifications {
-                   if let icon = notification.icon {
-                       self.utility.convertSVGtoPNGWriteToUserData(svgUrlString: icon, width: 25, rewrite: false, account: self.appDelegate.account) { _, _ in
-                           self.tableView.reloadData()
-                       }
-                   }
-                   self.notifications.append(notification)
-               }
-               self.refreshControl?.endRefreshing()
-               self.tableView.reloadData()
-           }
-       }
+        self.tableView.reloadData()
+
+        let results = await NextcloudKit.shared.getNotificationsAsync(account: session.account) { task in
+            Task {
+                await NCNetworking.shared.networkingTasks.track(identifier: "NCNotification", task: task)
+            }
+        }
+        guard results.error == .success, let notifications = results.notifications else {
+            return
+        }
+
+        self.notifications.removeAll()
+        let sortedNotifications = notifications.sorted { $0.date > $1.date }
+        for notification in sortedNotifications {
+            if let icon = notification.icon {
+                if await self.utility.convertSVGtoPNGWriteToUserData(serverUrl: icon, rewrite: false, account: session.account).image != nil {
+                    self.tableView.reloadData()
+                }
+            }
+            self.notifications.append(notification)
+        }
+        self.refreshControl?.endRefreshing()
+        self.tableView.reloadData()
     }
 }
 
 // MARK: -
 
-class NCNotificationCell: UITableViewCell, NCCellProtocol {
+class NCNotificationCell: UITableViewCell {
 
     @IBOutlet weak var icon: UIImageView!
     @IBOutlet weak var avatar: UIImageView!
@@ -329,31 +402,15 @@ class NCNotificationCell: UITableViewCell, NCCellProtocol {
     @IBOutlet weak var primaryWidth: NSLayoutConstraint!
     @IBOutlet weak var secondaryWidth: NSLayoutConstraint!
 
-    private var user = ""
-    private var index = IndexPath()
+    var user = ""
+    var identifier: Int = 0
 
     weak var delegate: NCNotificationCellDelegate?
     var notification: NKNotifications?
 
-    var indexPath: IndexPath {
-        get { return index }
-        set { index = newValue }
-    }
-    var fileAvatarImageView: UIImageView? {
-        return avatar
-    }
-    var fileUser: String? {
-        get { return user }
-        set { user = newValue ?? "" }
-    }
-
-    override func awakeFromNib() {
-        super.awakeFromNib()
-    }
-
     @IBAction func touchUpInsideRemove(_ sender: Any) {
         guard let notification = notification else { return }
-        delegate?.tapRemove(with: notification)
+        delegate?.tapRemove(with: notification, sender: sender)
     }
 
     @IBAction func touchUpInsidePrimary(_ sender: Any) {
@@ -361,7 +418,7 @@ class NCNotificationCell: UITableViewCell, NCCellProtocol {
                 let button = sender as? UIButton,
                 let label = button.titleLabel?.text
         else { return }
-        delegate?.tapAction(with: notification, label: label)
+        delegate?.tapAction(with: notification, label: label, sender: sender)
     }
 
     @IBAction func touchUpInsideSecondary(_ sender: Any) {
@@ -369,17 +426,11 @@ class NCNotificationCell: UITableViewCell, NCCellProtocol {
                 let button = sender as? UIButton,
                 let label = button.titleLabel?.text
         else { return }
-        delegate?.tapAction(with: notification, label: label)
-    }
-
-    @IBAction func touchUpInsideMore(_ sender: Any) {
-        guard let notification = notification else { return }
-        delegate?.tapMore(with: notification)
+        delegate?.tapAction(with: notification, label: label, sender: sender)
     }
 }
 
 protocol NCNotificationCellDelegate: AnyObject {
-    func tapRemove(with notification: NKNotifications)
-    func tapAction(with notification: NKNotifications, label: String)
-    func tapMore(with notification: NKNotifications)
+    func tapRemove(with notification: NKNotifications, sender: Any?)
+    func tapAction(with notification: NKNotifications, label: String, sender: Any?)
 }

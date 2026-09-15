@@ -1,136 +1,126 @@
-//
-//  NCSettingsAdvancedView.swift
-//  Nextcloud
-//
-//  Created by Aditya Tyagi on 08/03/24.
-//  Created by Marino Faggiana on 30/05/24.
-//  Copyright © 2024 Marino Faggiana. All rights reserved.
-//
-//  Author Aditya Tyagi <adityagi02@yahoo.com>
-//
-//  This program is free software: you can redistribute it and/or modify
-//  it under the terms of the GNU General Public License as published by
-//  the Free Software Foundation, either version 3 of the License, or
-//  (at your option) any later version.
-//
-//  This program is distributed in the hope that it will be useful,
-//  but WITHOUT ANY WARRANTY; without even the implied warranty of
-//  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-//  GNU General Public License for more details.
-//
-//  You should have received a copy of the GNU General Public License
-//  along with this program.  If not, see <http://www.gnu.org/licenses/>.
-//
+// SPDX-FileCopyrightText: Nextcloud GmbH
+// SPDX-FileCopyrightText: 2024 Aditya Tyagi
+// SPDX-FileCopyrightText: 2024 Marino Faggiana
+// SPDX-FileCopyrightText: 2026 Rasmus Wøldike
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 import SwiftUI
 import NextcloudKit
 
 struct NCSettingsAdvancedView: View {
     @ObservedObject var model: NCSettingsAdvancedModel
-    /// State variable for indicating whether the exit alert is shown.
+    // State variable for indicating whether the exit alert is shown.
     @State var showExitAlert: Bool = false
-    /// State variable for indicating whether the cache alert is shown.
+    // State variable for indicating whether the cache alert is shown.
     @State var showCacheAlert: Bool = false
-    /// State variable for indicating whether to disable crash reporter.
+    // State variable for indicating whether to disable crash reporter.
     @State var showCrashReporter: Bool = false
 
     var body: some View {
         Form {
-            /// Show Hidden Files
-            Section(content: {
-                Toggle(NSLocalizedString("_show_hidden_files_", comment: ""), isOn: $model.showHiddenFiles)
-                    .tint(Color(NCBrandColor.shared.brandElement))
-                    .onChange(of: model.showHiddenFiles) { _ in
-                        model.updateShowHiddenFiles()
-                }
-                .font(.system(size: 16))
-            }, footer: { })
-            /// file name
+            // file name
             Section(content: {
                NavigationLink(destination: LazyView {
-                   NCFileNameView(model: NCFileNameModel())
+                   NCFileNameView(model: NCFileNameModel(controller: model.controller))
                }) {
                    Text(NSLocalizedString("_filenamemask_", comment: ""))
-                       .font(.system(size: 16))
+                       .font(.body)
                }
             }, footer: {
-                Text(NSLocalizedString("_filenamemask_footer_", comment: ""))
+                Text(fileNameMaskFooter)
+                    .font(.footnote)
             })
-            /// Most Compatible & Enable Live Photo
+            // Most Compatible & Enable Live Photo
             Section(content: {
                 Toggle(NSLocalizedString("_format_compatibility_", comment: ""), isOn: $model.mostCompatible)
-                    .tint(Color(NCBrandColor.shared.brandElement))
-                    .onChange(of: model.mostCompatible) { _ in
+                    .font(.body)
+                    .tint(Color(NCBrandColor.shared.getElement(account: model.session.account)))
+                    .onChange(of: model.mostCompatible) {
                         model.updateMostCompatible()
-                }
-                .font(.system(size: 16))
-                Toggle(NSLocalizedString("_upload_mov_livephoto_", comment: ""), isOn: $model.livePhoto)
-                    .tint(Color(NCBrandColor.shared.brandElement))
-                    .onChange(of: model.livePhoto) { _ in
-                        model.updateLivePhoto()
-                }
-                .font(.system(size: 16))
+                    }
             }, footer: {
-                (
-                    Text(NSLocalizedString("_format_compatibility_footer_", comment: ""))
-                    +
-                    Text(NSLocalizedString("_upload_mov_livephoto_footer_", comment: ""))
-                ).font(.system(size: 12))
-                    .multilineTextAlignment(.leading)
+                Text(NSLocalizedString("_format_compatibility_footer_", comment: ""))
+                    .font(.footnote)
             })
-            /// Remove from Camera Roll
+
+            Section(content: {
+                Toggle(NSLocalizedString("_upload_mov_livephoto_", comment: ""), isOn: $model.livePhoto)
+                    .font(.body)
+                    .tint(Color(NCBrandColor.shared.getElement(account: model.session.account)))
+                    .onChange(of: model.livePhoto) {
+                        model.updateLivePhoto()
+                    }
+            }, footer: {
+                Text(NSLocalizedString("_upload_mov_livephoto_footer_", comment: ""))
+                    .font(.footnote)
+            })
+
+            // Remove from Camera Roll
             Section(content: {
                 Toggle(NSLocalizedString("_remove_photo_CameraRoll_", comment: ""), isOn: $model.removeFromCameraRoll)
-                    .tint(Color(NCBrandColor.shared.brandElement))
-                    .onChange(of: model.removeFromCameraRoll) { _ in
+                    .font(.body)
+                    .tint(Color(NCBrandColor.shared.getElement(account: model.session.account)))
+                    .onChange(of: model.removeFromCameraRoll) {
                         model.updateRemoveFromCameraRoll()
                 }
-                .font(.system(size: 16))
             }, footer: {
                 Text(NSLocalizedString("_remove_photo_CameraRoll_desc_", comment: ""))
-                    .font(.system(size: 12))
-                    .multilineTextAlignment(.leading)
+                    .font(.footnote)
             })
-            /// Section : Files App
+
+            // Save camera media to camera roll
+            Section(content: {
+                Toggle(NSLocalizedString("_save_to_camera_roll_", comment: ""), isOn: $model.saveCameraMediaToCameraRoll)
+                    .font(.body)
+                    .tint(Color(NCBrandColor.shared.getElement(account: model.session.account)))
+                    .onChange(of: model.saveCameraMediaToCameraRoll) {
+                        model.updateSaveCameraMediaToCameraRoll()
+                    }
+            }, footer: {
+                Text(NSLocalizedString("_save_to_camera_roll_desc_", comment: ""))
+                    .font(.footnote)
+            })
+            // Section : Files App
             if !NCBrandOptions.shared.disable_openin_file {
                 Section(content: {
                     Toggle(NSLocalizedString("_disable_files_app_", comment: ""), isOn: $model.appIntegration)
-                        .tint(Color(NCBrandColor.shared.brandElement))
-                        .onChange(of: model.appIntegration) { _ in
+                        .font(.body)
+                        .tint(Color(NCBrandColor.shared.getElement(account: model.session.account)))
+                        .onChange(of: model.appIntegration) {
                             model.updateAppIntegration()
                     }
-                    .font(.system(size: 16))
                 }, footer: {
                     Text(NSLocalizedString("_disable_files_app_footer_", comment: ""))
-                        .font(.system(size: 12))
-                        .multilineTextAlignment(.leading)
+                        .font(.footnote)
                 })
             }
-            /// Section: Privacy
+            // Section: Privacy
             if !NCBrandOptions.shared.disable_crash_service {
                 Section(content: {
                     Toggle(NSLocalizedString("_crashservice_title_", comment: ""), isOn: $model.crashReporter)
-                        .tint(Color(NCBrandColor.shared.brandElement))
-                        .onChange(of: model.crashReporter) { _ in
+                        .font(.body)
+                        .tint(Color(NCBrandColor.shared.getElement(account: model.session.account)))
+                        .onChange(of: model.crashReporter) {
                             model.updateCrashReporter()
                             showCrashReporter.toggle()
                     }
-                    .font(.system(size: 16))
                     .alert(NSLocalizedString("_crashservice_title_", comment: ""), isPresented: $showCrashReporter, actions: {
                         Button(NSLocalizedString("OK", comment: ""), role: .cancel) {
                             model.exitNextCloud(ext: showCrashReporter)
                         }
                     }, message: {
                         Text(NSLocalizedString("_crashservice_alert_", comment: ""))
+                            .font(.body)
                     })
                 }, header: {
                     Text(NSLocalizedString("_privacy_", comment: ""))
+                        .font(.headline)
                 }, footer: {
                     Text(NSLocalizedString("_privacy_footer_", comment: ""))
-                        .font(.system(size: 12))
-                        .multilineTextAlignment(.leading)
+                        .font(.footnote)
                 })
             }
-            /// Section: Diagnostic LOG
+            // Section: Diagnostic
             if !NCBrandOptions.shared.disable_log {
                 Section(content: {
                     /// View Log File
@@ -139,97 +129,95 @@ struct NCSettingsAdvancedView: View {
                     }, label: {
                         HStack {
                             Image(systemName: "doc.badge.gearshape")
-                                .resizable()
-                                .scaledToFit()
-                                .font(Font.system(.body).weight(.light))
-                                .frame(width: 25, height: 25)
+                                .font(.icon())
+                                .frame(width: 26)
                                 .foregroundColor(Color(NCBrandColor.shared.iconImageColor))
                             Text(NSLocalizedString("_view_log_", comment: ""))
+                                .font(.body)
                         }
-                        .font(.system(size: 16))
                     })
                     .tint(Color(UIColor.label))
-                    /// Set Log Level()
+                    // Set Log Level()
                     Picker(NSLocalizedString("_set_log_level_", comment: ""), selection: $model.selectedLogLevel) {
-                        ForEach(LogLevel.allCases) { level in
+                        ForEach(NKLogLevel.allCases) { level in
                             Text(level.displayText).tag(level)
+                                .font(.body)
                         }
                     }
-                    .font(.system(size: 16))
-                    .onChange(of: model.selectedLogLevel) { _ in
+                    .cappedFont(.body, maxDynamicType: .accessibility2)
+                    .onChange(of: model.selectedLogLevel) {
                         model.updateSelectedLogLevel()
                     }
-                    /// Clear Log File
+                    // Clear Log File
                     Button(action: {
                         model.clearLogFile()
                     }, label: {
                         HStack {
                             Image(systemName: "xmark")
-                                .resizable()
-                                .scaledToFit()
-                                .font(Font.system(.body).weight(.light))
-                                .frame(width: 25, height: 15)
+                                .font(.icon())
+                                .frame(width: 26)
                                 .foregroundColor(Color(NCBrandColor.shared.iconImageColor))
                             Text(NSLocalizedString("_clear_log_", comment: ""))
+                                .font(.body)
                         }
-                        .font(.system(size: 16))
                     })
                     .tint(Color(UIColor.label))
-                    .alert(NSLocalizedString("_log_file_clear_alert_", comment: ""), isPresented: $model.logFileCleared) {
-                        Button(NSLocalizedString("OK", comment: ""), role: .cancel) { }
-                    }
                 }, header: {
                     Text(NSLocalizedString("_diagnostics_", comment: ""))
-                }, footer: { })
-                /// Set Log Level() & Capabilities
+                        .font(.headline)
+                }, footer: {
+                    Text(NSLocalizedString("_diagnostics_footer_", comment: ""))
+                        .font(.footnote)
+                })
+                // Set Log Level() & Capabilities
                 if model.isAdminGroup {
                     Section(content: {
                         NavigationLink(destination: LazyView {
-                            NCCapabilitiesView(model: NCCapabilitiesModel())
+                            NCCapabilitiesView(model: NCCapabilitiesModel(controller: model.controller))
                         }) {
                             HStack {
                                 Image(systemName: "list.bullet")
-                                    .resizable()
-                                    .scaledToFit()
-                                    .font(Font.system(.body).weight(.light))
-                                    .frame(width: 25, height: 25)
+                                    .font(.icon())
+                                    .frame(width: 26)
                                     .foregroundColor(Color(NCBrandColor.shared.iconImageColor))
                                 Text(NSLocalizedString("_capabilities_", comment: ""))
+                                    .font(.body)
                             }
-                            .font(.system(size: 16))
                         }
                     }, header: {
                         Text(NSLocalizedString("_capabilities_", comment: ""))
+                            .font(.headline)
                     }, footer: {
                         Text(NSLocalizedString("_capabilities_footer_", comment: ""))
+                            .font(.footnote)
                     })
                 }
             }
-            /// Delete in Cache & Clear Cache
+            // Delete in Cache & Clear Cache
             Section(content: {
                 Picker(NSLocalizedString("_delete_old_files_", comment: ""), selection: $model.selectedInterval) {
                     ForEach(CacheDeletionInterval.allCases) { interval in
-                        Text(interval.displayText).tag(interval)
+                        Text(interval.displayText)
+                            .tag(interval)
+                            .font(.body)
                     }
                 }
-                .font(.system(size: 16))
-                    .pickerStyle(.automatic)
-                    .onChange(of: model.selectedInterval) { _ in
-                        model.updateSelectedInterval()
-                    }
+                .cappedFont(.body, maxDynamicType: .accessibility2)
+                .pickerStyle(.automatic)
+                .onChange(of: model.selectedInterval) {
+                    model.updateSelectedInterval()
+                }
                 Button(action: {
                     showCacheAlert.toggle()
                 }, label: {
                     HStack {
                         Image(systemName: "xmark")
-                            .resizable()
-                            .scaledToFit()
-                            .font(Font.system(.body).weight(.light))
-                            .frame(width: 15, height: 15)
+                            .font(.icon())
+                            .frame(width: 26)
                             .foregroundColor(Color(NCBrandColor.shared.iconImageColor))
                         Text(NSLocalizedString("_clear_cache_", comment: ""))
+                            .font(.body)
                     }
-                    .font(.system(size: 16))
                 })
                 .tint(Color(UIColor.label))
                 .alert(NSLocalizedString("_want_delete_cache_", comment: ""), isPresented: $showCacheAlert) {
@@ -240,27 +228,26 @@ struct NCSettingsAdvancedView: View {
                 }
             }, header: {
                 Text(NSLocalizedString("_delete_files_desc_", comment: ""))
+                    .font(.headline)
             }, footer: {
-                Text(model.footerTitle)
-                    .font(.system(size: 12))
+                Text("_clear_cache_footer_")
                     .multilineTextAlignment(.leading)
+                    .font(.footnote)
             })
-            /// Reset Application
+            // Reset Application
             Section(content: {
                 Button(action: {
                     showExitAlert.toggle()
                 }, label: {
                     HStack {
                         Image(systemName: "xmark")
-                            .resizable()
-                            .scaledToFit()
-                            .font(Font.system(.body).weight(.light))
-                            .frame(width: 15, height: 15)
+                            .font(.icon())
+                            .frame(width: 26)
                             .foregroundColor(Color(UIColor.systemRed))
                         Text(NSLocalizedString("_exit_", comment: ""))
+                            .font(.body)
                             .foregroundColor(Color(UIColor.systemRed))
                     }
-                    .font(.system(size: 16))
                 })
                 .tint(Color(UIColor.label))
                 .alert(NSLocalizedString("_want_exit_", comment: ""), isPresented: $showExitAlert) {
@@ -272,15 +259,32 @@ struct NCSettingsAdvancedView: View {
             }, footer: {
                (
                 Text(NSLocalizedString("_exit_footer_", comment: ""))
+                    .font(.footnote)
                 +
                 Text("\n\n")
+                    .font(.footnote)
                )
-                    .font(.system(size: 12))
-                    .multilineTextAlignment(.leading)
             })
         }
         .navigationBarTitle(NSLocalizedString("_advanced_", comment: ""))
+        .navigationBarTitleDisplayMode(.inline)
         .defaultViewModifier(model)
+    }
+
+    private var fileNameMaskFooter: AttributedString {
+        let boldPart = NSLocalizedString("_filenamemask_format_", comment: "")
+        let localizedString = String(
+            format: NSLocalizedString("_filenamemask_footer_", comment: ""),
+            boldPart
+        )
+
+        var attributedString = AttributedString(localizedString)
+
+        if let range = attributedString.range(of: boldPart) {
+            attributedString[range].font = .footnote.weight(.semibold)
+        }
+
+        return attributedString
     }
 }
 

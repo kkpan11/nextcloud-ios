@@ -1,32 +1,21 @@
-//
-//  NCUtility+Date.swift
-//  Nextcloud
-//
-//  Created by Marino Faggiana on 06/11/23.
-//  Copyright © 2023 Marino Faggiana. All rights reserved.
-//
-//  Author Marino Faggiana <marino.faggiana@nextcloud.com>
-//
-//  This program is free software: you can redistribute it and/or modify
-//  it under the terms of the GNU General Public License as published by
-//  the Free Software Foundation, either version 3 of the License, or
-//  (at your option) any later version.
-//
-//  This program is distributed in the hope that it will be useful,
-//  but WITHOUT ANY WARRANTY without even the implied warranty of
-//  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-//  GNU General Public License for more details.
-//
-//  You should have received a copy of the GNU General Public License
-//  along with this program.  If not, see <http://www.gnu.org/licenses/>.
-//
+// SPDX-FileCopyrightText: Nextcloud GmbH
+// SPDX-FileCopyrightText: 2023 Marino Faggiana
+// SPDX-License-Identifier: GPL-3.0-or-later
 
+import Foundation
 import UIKit
 
 extension NCUtility {
+    func longDate(_ date: Date) -> String {
+        return DateFormatter.localizedString(from: date, dateStyle: .long, timeStyle: .none)
+    }
 
+    /// Returns a localized string representing the given date in a user-friendly format.
+    /// The function handles the following cases:
+    /// - If the date is today: Returns "Today".
+    /// - If the date is yesterday: Returns "Yesterday".
+    /// - Otherwise, it returns the date in a long format (e.g., "10 February 2025").
     func getTitleFromDate(_ date: Date) -> String {
-
         guard let yesterday = Calendar.current.date(byAdding: .day, value: -1, to: Date()) else {
             return DateFormatter.localizedString(from: date, dateStyle: .long, timeStyle: .none)
         }
@@ -46,8 +35,14 @@ extension NCUtility {
         }
     }
 
-    func dateDiff(_ date: Date?) -> String {
-
+    /// Represents date as relative time:  (e.g., "1 minute ago", "2 hours ago", "3 days ago", or a formatted date).
+    /// The function handles the following cases:
+    /// - Less than a minute: Returns "Less than a minute ago".
+    /// - Less than an hour: Returns the number of minutes (e.g., "5 minutes ago").
+    /// - Less than a day: Returns the number of hours (e.g., "2 hours ago").
+    /// - Less than a month: Returns the number of days (e.g., "3 days ago").
+    /// - More than a month: Returns the full formatted date (e.g., "Jan 10, 2025").
+    func getRelativeDateTitle(_ date: Date?) -> String {
         guard let date else { return "" }
         let today = Date()
         var ti = date.timeIntervalSince(today)
@@ -78,7 +73,7 @@ extension NCUtility {
         } else {
             let formatter = DateFormatter()
             formatter.formatterBehavior = .behavior10_4
-            formatter.dateStyle = .medium
+            formatter.dateStyle = .medium // Returns formatted date, e.g., "Jan 10, 2025"
             return formatter.string(from: date)
         }
     }

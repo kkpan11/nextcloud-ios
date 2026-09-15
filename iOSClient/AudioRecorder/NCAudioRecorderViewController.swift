@@ -1,24 +1,7 @@
-//
-//  NCAudioRecorderViewController.swift
-//  Nextcloud
-//
-//  Created by Marino Faggiana on 08/03/19.
-//  Copyright (c) 2019 Marino Faggiana. All rights reserved.
-//
-//  Author Marino Faggiana <marino.faggiana@nextcloud.com>
-//
-//  This program is free software: you can redistribute it and/or modify
-//  it under the terms of the GNU General Public License as published by
-//  the Free Software Foundation, either version 3 of the License, or
-//  (at your option) any later version.
-//
-//  This program is distributed in the hope that it will be useful,
-//  but WITHOUT ANY WARRANTY; without even the implied warranty of
-//  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-//  GNU General Public License for more details.
-//
-//  You should have received a copy of the GNU General Public License
-//  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+// SPDX-FileCopyrightText: Nextcloud GmbH
+// SPDX-FileCopyrightText: 2019 Marino Faggiana
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 //
 //  --------------------------------
 //  Based on code of Venkat Kukunuru
@@ -27,19 +10,24 @@
 import UIKit
 import AVFoundation
 import QuartzCore
+import NextcloudKit
 
 class NCAudioRecorderViewController: UIViewController, NCAudioRecorderDelegate {
-
-    var recording: NCAudioRecorder!
-    var startDate: Date = Date()
-    var fileName: String = ""
-    var serverUrl = ""
-    let appDelegate = (UIApplication.shared.delegate as? AppDelegate)!
-
     @IBOutlet weak var contentContainerView: UIView!
     @IBOutlet weak var durationLabel: UILabel!
     @IBOutlet weak var startStopLabel: UILabel!
     @IBOutlet weak var voiceRecordHUD: VoiceRecordHUD!
+
+    var recording: NCAudioRecorder!
+    var startDate: Date = Date()
+    var fileName: String = ""
+    var controller: NCMainTabBarController!
+    let database = NCManageDatabase.shared
+
+    @MainActor
+    var session: NCSession.Session {
+        NCSession.shared.getSession(controller: controller)
+    }
 
     // MARK: - View Life Cycle
 
@@ -55,7 +43,7 @@ class NCAudioRecorderViewController: UIViewController, NCAudioRecorderDelegate {
         voiceRecordHUD.fillColor = UIColor.green
 
         Task {
-            self.fileName = await NCNetworking.shared.createFileName(fileNameBase: NSLocalizedString("_untitled_", comment: "") + ".m4a", account: self.appDelegate.account, serverUrl: self.serverUrl)
+            self.fileName = await NCNetworking.shared.createFileName(fileNameBase: NSLocalizedString("_untitled_", comment: "") + ".m4a", account: self.session.account, serverUrl: controller.currentServerUrl())
             recording = NCAudioRecorder(to: self.fileName)
             recording.delegate = self
             do {
@@ -96,15 +84,27 @@ class NCAudioRecorderViewController: UIViewController, NCAudioRecorderDelegate {
     }
 
     func uploadMetadata() {
-        let fileNamePath = NSTemporaryDirectory() + self.fileName
-        let metadata = NCManageDatabase.shared.createMetadata(account: appDelegate.account, user: appDelegate.user, userId: appDelegate.userId, fileName: fileName, fileNameView: fileName, ocId: UUID().uuidString, serverUrl: self.serverUrl, urlBase: appDelegate.urlBase, url: "", contentType: "")
-        metadata.session = NCNetworking.shared.sessionUploadBackground
-        metadata.sessionSelector = NCGlobal.shared.selectorUploadFile
-        metadata.status = NCGlobal.shared.metadataStatusWaitUpload
-        metadata.sessionDate = Date()
-        metadata.size = NCUtilityFileSystem().getFileSize(filePath: fileNamePath)
-        NCUtilityFileSystem().copyFile(atPath: fileNamePath, toPath: NCUtilityFileSystem().getDirectoryProviderStorageOcId(metadata.ocId, fileNameView: metadata.fileNameView))
-        NCNetworkingProcess.shared.createProcessUploads(metadatas: [metadata])
+        Task {
+            let fileNamePath = NSTemporaryDirectory() + self.fileName
+            let metadata = await NCManageDatabaseCreateMetadata().createMetadataAsync(
+                fileName: fileName,
+                ocId: UUID().uuidString,
+                serverUrl: controller.currentServerUrl(),
+                session: self.session,
+                sceneIdentifier: self.controller?.sceneIdentifier)
+
+            metadata.session = NCNetworking.shared.sessionUploadBackground
+            metadata.sessionSelector = NCGlobal.shared.selectorUploadFile
+            metadata.status = NCGlobal.shared.metadataStatusWaitUpload
+            metadata.sessionDate = Date()
+            metadata.size = NCUtilityFileSystem().getFileSize(filePath: fileNamePath)
+            NCUtilityFileSystem().copyFile(atPath: fileNamePath, toPath: NCUtilityFileSystem().getDirectoryProviderStorageOcId(metadata.ocId,
+                                                                                                                               fileName: metadata.fileNameView,
+                                                                                                                               userId: metadata.userId,
+                                                                                                                               urlBase: metadata.urlBase))
+
+            await self.database.addMetadataAsync(metadata)
+        }
     }
 
     func audioMeterDidUpdate(_ db: Float) {
@@ -192,7 +192,7 @@ open class NCAudioRecorder: NSObject {
     open func prepare() throws {
 
         let settings: [String: AnyObject] = [
-            AVFormatIDKey: NSNumber(value: Int32(kAudioFormatAppleLossless) as Int32),
+            AVFormatIDKey: NSNumber(value: Int32(kAudioFormatMPEG4AAC) as Int32),
             AVEncoderAudioQualityKey: AVAudioQuality.max.rawValue as AnyObject,
             AVEncoderBitRateKey: bitRate as AnyObject,
             AVNumberOfChannelsKey: channels as AnyObject,

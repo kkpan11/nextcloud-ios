@@ -1,49 +1,31 @@
-//
-//  NCTrash+CollectionView.swift
-//  Nextcloud
-//
-//  Created by Henrik Storch on 18.01.22.
-//  Copyright © 2022 Henrik Storch. All rights reserved.
-//
-//  Author Henrik Storch <henrik.storch@nextcloud.com>
-//
-//  This program is free software: you can redistribute it and/or modify
-//  it under the terms of the GNU General Public License as published by
-//  the Free Software Foundation, either version 3 of the License, or
-//  (at your option) any later version.
-//
-//  This program is distributed in the hope that it will be useful,
-//  but WITHOUT ANY WARRANTY; without even the implied warranty of
-//  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-//  GNU General Public License for more details.
-//
-//  You should have received a copy of the GNU General Public License
-//  along with this program.  If not, see <http://www.gnu.org/licenses/>.
-//
+// SPDX-FileCopyrightText: Nextcloud GmbH
+// SPDX-FileCopyrightText: 2018 Marino Faggiana
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 import UIKit
 import RealmSwift
+import NextcloudKit
 
 // MARK: UICollectionViewDelegate
 extension NCTrash: UICollectionViewDelegate {
     func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
-        let tableTrash = datasource[indexPath.item]
+        guard let resultTableTrash = datasource?[indexPath.item] else { return }
         guard !isEditMode else {
-            if let index = selectOcId.firstIndex(of: tableTrash.fileId) {
+            if let index = selectOcId.firstIndex(of: resultTableTrash.fileId) {
                 selectOcId.remove(at: index)
             } else {
-                selectOcId.append(tableTrash.fileId)
+                selectOcId.append(resultTableTrash.fileId)
             }
             collectionView.reloadItems(at: [indexPath])
             tabBarSelect.update(selectOcId: selectOcId)
             return
         }
 
-        if tableTrash.directory,
+        if resultTableTrash.directory,
            let ncTrash: NCTrash = UIStoryboard(name: "NCTrash", bundle: nil).instantiateInitialViewController() as? NCTrash {
-            ncTrash.filePath = tableTrash.filePath + tableTrash.fileName
-            ncTrash.titleCurrentFolder = tableTrash.trashbinFileName
-            ncTrash.filename = tableTrash.fileName
+            ncTrash.filePath = resultTableTrash.filePath + resultTableTrash.fileName
+            ncTrash.titleCurrentFolder = resultTableTrash.trashbinFileName
+            ncTrash.filename = resultTableTrash.fileName
             self.navigationController?.pushViewController(ncTrash, animated: true)
         }
     }
@@ -52,45 +34,143 @@ extension NCTrash: UICollectionViewDelegate {
 // MARK: UICollectionViewDataSource
 extension NCTrash: UICollectionViewDataSource {
     func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int {
-        return datasource.count
+        return datasource?.count ?? 0
+    }
+
+    func collectionView(_ collectionView: UICollectionView,
+                        didEndDisplaying cell: UICollectionViewCell,
+                        forItemAt indexPath: IndexPath) {
+        guard let cell = cell as? NCTrashCellProtocol else {
+            return
+        }
+
+        Task {
+            await NCTransferCoordinator.shared.cancel(identifier: cell.identifier)
+        }
+    }
+
+    func collectionView(_ collectionView: UICollectionView,
+                        willDisplay cell: UICollectionViewCell,
+                        forItemAt indexPath: IndexPath) {
+        guard let datasource,
+              indexPath.item >= 0,
+              indexPath.item < datasource.count else {
+            return
+        }
+        let result = datasource[indexPath.item]
+        let identifier = result.fileId
+        let etag = result.fileName
+        let iconName = result.iconName
+        let imageExists = utilityFileSystem.fileProviderStorageImageExists(identifier, etag: etag, userId: self.session.userId, urlBase: self.session.urlBase)
+
+        guard result.hasPreview,
+              !imageExists else {
+            return
+        }
+
+        Task {
+            await NCTransferCoordinator.shared.start(
+                identifier: identifier,
+                priority: .visible
+            ) {
+                let result = await NextcloudKit.shared.downloadTrashPreviewAsync(
+                    fileId: identifier,
+                    account: self.session.account)
+
+                guard !Task.isCancelled,
+                      result.error == .success,
+                      let data = result.responseData?.data else {
+                    return
+                }
+
+                let image = await NCUtility().createImageFileFrom(
+                    data: data,
+                    ocId: identifier,
+                    etag: etag,
+                    ext: NCGlobal.shared.previewExt256,
+                    userId: self.session.userId,
+                    urlBase: self.session.urlBase)
+
+                await MainActor.run {
+                    guard let visibleIndexPath = collectionView.indexPathsForVisibleItems.first(where: { visibleIndexPath in
+                        guard let fileId = self.datasource?[visibleIndexPath.item].fileId else {
+                            return false
+                        }
+                        return String(fileId) == identifier
+                    }),
+                    let cell = collectionView.cellForItem(at: visibleIndexPath) as? NCTrashCellProtocol,
+                        cell.identifier == identifier else {
+                            return
+                    }
+
+                    if let image {
+                        cell.image?.contentMode = .scaleAspectFill
+                        UIView.transition(
+                            with: cell.image,
+                            duration: 0.75,
+                            options: .transitionCrossDissolve
+                        ) {
+                            cell.image.image = image
+                        }
+                    } else {
+                        cell.image.contentMode = .scaleAspectFit
+                        cell.image.image = NCUtility().loadImage(
+                            named: iconName,
+                            useTypeIconFile: true,
+                            account: self.session.account
+                        )
+                    }
+                }
+            }
+        }
     }
 
     func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
-        let tableTrash = datasource[indexPath.item]
         var image: UIImage?
         var cell: NCTrashCellProtocol & UICollectionViewCell
 
         if layoutForView?.layout == NCGlobal.shared.layoutList {
-            guard let listCell = collectionView.dequeueReusableCell(withReuseIdentifier: "listCell", for: indexPath) as? NCTrashListCell else { return NCTrashListCell() }
+            let listCell = (collectionView.dequeueReusableCell(withReuseIdentifier: "listCell", for: indexPath) as? NCTrashListCell)!
             listCell.delegate = self
             cell = listCell
         } else {
-            guard let gridCell = collectionView.dequeueReusableCell(withReuseIdentifier: "gridCell", for: indexPath) as? NCTrashGridCell else { return NCTrashGridCell() }
-            gridCell.setButtonMore(named: NCGlobal.shared.buttonMoreMore, image: NCImageCache.images.buttonMore)
+            let gridCell = (collectionView.dequeueReusableCell(withReuseIdentifier: "gridCell", for: indexPath) as? NCTrashGridCell)!
+            gridCell.setButtonMore(image: NCImageCache.shared.getImageButtonMore())
             gridCell.delegate = self
             cell = gridCell
         }
 
-        if tableTrash.iconName.isEmpty {
-            image = NCImageCache.images.file
-        } else {
-            image = NCUtility().loadImage(named: tableTrash.iconName, useTypeIconFile: true)
+        guard let resultTableTrash = datasource?[indexPath.item] else { return cell }
+
+        let contextMenu = NCContextMenuTrash(objectId: resultTableTrash.fileId, trashController: self)
+        if let listCell = cell as? NCTrashListCell {
+            listCell.buttonMore.menu = contextMenu.viewMenu()
+            listCell.buttonMore.showsMenuAsPrimaryAction = true
+        } else if let gridCell = cell as? NCTrashGridCell {
+            gridCell.buttonMore.menu = contextMenu.viewMenu()
+            gridCell.buttonMore.showsMenuAsPrimaryAction = true
         }
 
-        if FileManager().fileExists(atPath: utilityFileSystem.getDirectoryProviderStorageIconOcId(tableTrash.fileId, etag: tableTrash.fileName)) {
-            image = UIImage(contentsOfFile: utilityFileSystem.getDirectoryProviderStorageIconOcId(tableTrash.fileId, etag: tableTrash.fileName))
+        cell.image.contentMode = .scaleAspectFit
+
+        if resultTableTrash.iconName.isEmpty {
+            image = NCImageCache.shared.getImageFile()
         } else {
-            if tableTrash.hasPreview && !utilityFileSystem.fileProviderStoragePreviewIconExists(tableTrash.fileId, etag: tableTrash.fileName) {
-                if NCNetworking.shared.downloadThumbnailTrashQueue.operations.filter({ ($0 as? NCOperationDownloadThumbnailTrash)?.fileId == tableTrash.fileId }).isEmpty {
-                    NCNetworking.shared.downloadThumbnailTrashQueue.addOperation(NCOperationDownloadThumbnailTrash(tableTrash: tableTrash, fileId: tableTrash.fileId, cell: cell, collectionView: collectionView))
-                }
-            }
+            image = NCUtility().loadImage(named: resultTableTrash.iconName, useTypeIconFile: true, account: resultTableTrash.account)
         }
 
-        cell.indexPath = indexPath
-        cell.objectId = tableTrash.fileId
-        cell.setupCellUI(tableTrash: tableTrash, image: image)
-        cell.selected(selectOcId.contains(tableTrash.fileId), isEditMode: isEditMode)
+        if let imageIcon = utility.getImage(ocId: resultTableTrash.fileId,
+                                            etag: resultTableTrash.fileName,
+                                            ext: NCGlobal.shared.previewExt512,
+                                            userId: session.userId,
+                                            urlBase: session.urlBase) {
+            image = imageIcon
+            cell.image.contentMode = .scaleAspectFill
+        }
+
+        cell.identifier = resultTableTrash.fileId
+        cell.setupCellUI(tableTrash: resultTableTrash, image: image)
+        cell.selected(selectOcId.contains(resultTableTrash.fileId), isEditMode: isEditMode, color: NCBrandColor.shared.getElement(account: session.account))
 
         return cell
     }
@@ -137,15 +217,16 @@ extension NCTrash: UICollectionViewDataSource {
         if kind == UICollectionView.elementKindSectionHeader {
             guard let header = collectionView.dequeueReusableSupplementaryView(ofKind: kind, withReuseIdentifier: "sectionFirstHeaderEmptyData", for: indexPath) as? NCSectionFirstHeaderEmptyData
             else { return NCSectionFirstHeaderEmptyData() }
-            header.emptyImage.image = utility.loadImage(named: "trash", colors: [NCBrandColor.shared.brandElement])
+            header.emptyImage.image = utility.loadImage(named: "trash", colors: [NCBrandColor.shared.getElement(account: session.account)])
             header.emptyTitle.text = NSLocalizedString("_trash_no_trash_", comment: "")
             header.emptyDescription.text = NSLocalizedString("_trash_no_trash_description_", comment: "")
             return header
         } else {
             guard let footer = collectionView.dequeueReusableSupplementaryView(ofKind: kind, withReuseIdentifier: "sectionFooter", for: indexPath) as? NCSectionFooter
             else { return NCSectionFooter() }
-            footer.setTitleLabel(setTextFooter(datasource: datasource))
-            footer.separatorIsHidden(true)
+            if let datasource {
+                footer.setTitleLabel(setTextFooter(datasource: datasource))
+            }
             return footer
         }
     }
@@ -155,12 +236,12 @@ extension NCTrash: UICollectionViewDataSource {
 extension NCTrash: UICollectionViewDelegateFlowLayout {
     func collectionView(_ collectionView: UICollectionView, layout collectionViewLayout: UICollectionViewLayout, referenceSizeForHeaderInSection section: Int) -> CGSize {
         var height: Double = 0
-        if datasource.isEmpty {
-            height = NCGlobal.shared.getHeightHeaderEmptyData(view: view, portraitOffset: 0, landscapeOffset: 0)
+        if let datasource, datasource.isEmpty {
+            height = utility.getHeightHeaderEmptyData(view: view, portraitOffset: 0, landscapeOffset: 0)
         }
         return CGSize(width: collectionView.frame.width, height: height)
     }
     func collectionView(_ collectionView: UICollectionView, layout collectionViewLayout: UICollectionViewLayout, referenceSizeForFooterInSection section: Int) -> CGSize {
-        return CGSize(width: collectionView.frame.width, height: NCGlobal.shared.endHeightFooter)
+        return CGSize(width: collectionView.frame.width, height: 85)
     }
 }

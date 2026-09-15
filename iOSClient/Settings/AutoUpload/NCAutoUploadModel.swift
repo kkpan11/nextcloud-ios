@@ -1,188 +1,196 @@
-//
-//  NCAutoUploadModel.swift
-//  Nextcloud
-//
-//  Created by Aditya Tyagi on 08/03/24.
-//  Created by Marino Faggiana on 30/05/24.
-//  Copyright © 2024 Marino Faggiana. All rights reserved.
-//
-//  Author Aditya Tyagi <adityagi02@yahoo.com>
-//
-//  This program is free software: you can redistribute it and/or modify
-//  it under the terms of the GNU General Public License as published by
-//  the Free Software Foundation, either version 3 of the License, or
-//  (at your option) any later version.
-//
-//  This program is distributed in the hope that it will be useful,
-//  but WITHOUT ANY WARRANTY; without even the implied warranty of
-//  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-//  GNU General Public License for more details.
-//
-//  You should have received a copy of the GNU General Public License
-//  along with this program.  If not, see <http://www.gnu.org/licenses/>.
-//
+// SPDX-FileCopyrightText: Nextcloud GmbH
+// SPDX-FileCopyrightText: 2024 Aditya Tyagi
+// SPDX-FileCopyrightText: 2024 Marino Faggiana
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 import Foundation
+import UIKit
 import Photos
 import NextcloudKit
+import SwiftUI
+
+enum AutoUploadTimespan: String, CaseIterable, Identifiable {
+    case allPhotos = "_all_photos_"
+    case newPhotosOnly = "_new_photos_only_"
+    var id: Self { self }
+}
 
 /// A model that allows the user to configure the `auto upload settings for Nextcloud`
 class NCAutoUploadModel: ObservableObject, ViewOnAppearHandling {
-    /// AppDelegate
-    let appDelegate = (UIApplication.shared.delegate as? AppDelegate)!
-    /// A state variable that indicates whether auto upload is enabled or not
-    @Published var autoUpload: Bool = false
-    /// A state variable that indicates whether to open NCSelect View or not
-    @Published var autoUploadFolder: Bool = false
-    /// A state variable that indicates whether auto upload for photos is enabled or not
+    /// Whether auto upload for photos is enabled or not
     @Published var autoUploadImage: Bool = false
-    /// A state variable that indicates whether auto upload for photos is restricted to Wi-Fi only or not
+    /// Whether auto upload for photos is restricted to Wi-Fi only or not
     @Published var autoUploadWWAnPhoto: Bool = false
-    /// A state variable that indicates whether auto upload for videos is enabled or not
+    /// Whether auto upload for videos is enabled or not
     @Published var autoUploadVideo: Bool = false
-    /// A state variable that indicates whether auto upload for videos is enabled or not
+    /// Whether auto upload for videos is enabled or not
     @Published var autoUploadWWAnVideo: Bool = false
-    /// A state variable that indicates whether auto upload for full resolution photos is enabled or not
-    @Published var autoUploadFull: Bool = false
-    /// A state variable that indicates whether auto upload creates subfolders based on date or not
+    /// Whether auto upload is enabled or not
+    @Published var autoUploadStart: Bool = false
+    /// Whether auto upload creates subfolders based on date or not
     @Published var autoUploadCreateSubfolder: Bool = false
-    /// A state variable that indicates the granularity of the subfolders, either daily, monthly, or yearly
+    /// The granularity of the subfolders, either daily, monthly, or yearly
     @Published var autoUploadSubfolderGranularity: Granularity = .monthly
-    /// A state variable that shows error in view in case of an error
+    /// The date from when new photos/videos will be uploaded.
+    @Published var autoUploadSinceDate: Date?
+    /// Whether a warning should be shown if all photos must be uploaded.
+    @Published var showUploadAllPhotosWarning = false
+    /// Whether Photos permissions have been granted or not.
+    @Published var photosPermissionsGranted = true
+    /// Whether `Always` location authorization has been granted, enabling background location-based auto upload.
+    @Published var locationAutoUploadPermissionGranted: Bool = false
+
+    /// Whether the error alert should be shown in the view.
     @Published var showErrorAlert: Bool = false
+    /// The currently displayed section name.
     @Published var sectionName = ""
+    /// Whether the user is authorized.
     @Published var isAuthorized: Bool = false
-    /// A string variable that contains error text
+    /// Error text shown to the user.
     @Published var error: String = ""
-    private let manageDatabase = NCManageDatabase.shared
-    @Published var autoUploadPath = "\(NCManageDatabase.shared.getAccountAutoUploadFileName())"
-    /// Root View Controller
+    /// Shared Nextcloud database instance.
+    let database = NCManageDatabase.shared
+
+    /// Root view controller used to present UI from this model.
     var controller: NCMainTabBarController?
-    /// A variable user for change the auto upload directory
+    /// Server URL used to change the auto-upload directory.
     var serverUrl: String = ""
+    /// The current account session.
+    var session: NCSession.Session {
+        NCSession.shared.getSession(controller: controller)
+    }
+
+    /// The active window scene, used for presenting banners.
+    var windowScene: UIWindowScene? {
+        SceneManager.shared.getWindowScene(controller: controller)
+    }
 
     /// Initialization code to set up the ViewModel with the active account
     init(controller: NCMainTabBarController?) {
         self.controller = controller
-        onViewAppear()
     }
 
     /// Triggered when the view appears.
     func onViewAppear() {
-        let activeAccount: tableAccount? = manageDatabase.getActiveAccount()
-        if let account = activeAccount {
-            autoUpload = account.autoUpload
-            autoUploadImage = account.autoUploadImage
-            autoUploadWWAnPhoto = account.autoUploadWWAnPhoto
-            autoUploadVideo = account.autoUploadVideo
-            autoUploadWWAnVideo = account.autoUploadWWAnVideo
-            autoUploadFull = account.autoUploadFull
-            autoUploadCreateSubfolder = account.autoUploadCreateSubfolder
-            autoUploadSubfolderGranularity = Granularity(rawValue: account.autoUploadSubfolderGranularity) ?? .monthly
-            serverUrl = NCUtilityFileSystem().getHomeServer(urlBase: appDelegate.urlBase, userId: appDelegate.userId)
+        self.checkPermission()
+        if let tableAccount = self.database.getTableAccount(predicate: NSPredicate(format: "account == %@", session.account)) {
+            autoUploadImage = tableAccount.autoUploadImage
+            autoUploadWWAnPhoto = tableAccount.autoUploadWWAnPhoto
+            autoUploadVideo = tableAccount.autoUploadVideo
+            autoUploadWWAnVideo = tableAccount.autoUploadWWAnVideo
+            autoUploadStart = tableAccount.autoUploadStart
+            autoUploadCreateSubfolder = tableAccount.autoUploadCreateSubfolder
+            autoUploadSubfolderGranularity = Granularity(rawValue: tableAccount.autoUploadSubfolderGranularity) ?? .monthly
+            autoUploadSinceDate = tableAccount.autoUploadSinceDate
         }
-        if autoUpload {
-            requestAuthorization { value in
-                self.autoUpload = value
-                self.updateAccountProperty(\.autoUpload, value: value)
-            }
-        }
+
+        serverUrl = NCUtilityFileSystem().getHomeServer(session: session)
+
+        requestAuthorization()
+
+        if !autoUploadImage && !autoUploadVideo { autoUploadImage = true }
     }
 
     // MARK: - All functions
 
-    func requestAuthorization(completion: @escaping (Bool) -> Void = { _ in }) {
+    /// Requests Photos library authorization and warns the user if background app refresh is disabled.
+    func requestAuthorization() {
         PHPhotoLibrary.requestAuthorization { status in
-            DispatchQueue.main.async {
+            DispatchQueue.main.async { [self] in
                 let value = (status == .authorized)
-                if !value {
-                    let error = NKError(errorCode: NCGlobal.shared.errorInternalError, errorDescription: NSLocalizedString("_access_photo_not_enabled_msg_", comment: ""), responseData: nil)
-                    NCContentPresenter().messageNotification("_error_", error: error, delay: NCGlobal.shared.dismissAfterSecond, type: .error)
-                } else if UIApplication.shared.backgroundRefreshStatus != .available {
-                    let error = NKError(errorCode: NCGlobal.shared.errorInternalError, errorDescription: NSLocalizedString("_access_background_app_refresh_denied_", comment: ""), responseData: nil)
-                    NCContentPresenter().messageNotification("_info_", error: error, delay: NCGlobal.shared.dismissAfterSecond, type: .info)
-                }
-                completion(value)
-            }
-        }
-    }
+                photosPermissionsGranted = value
 
-    /// Updates the auto-upload setting.
-    func handleAutoUploadChange(newValue: Bool) {
-        if newValue {
-            requestAuthorization { value in
-                self.autoUpload = value
-                self.updateAccountProperty(\.autoUpload, value: value)
-                NCManageDatabase.shared.setAccountAutoUploadFileName("")
-                NCManageDatabase.shared.setAccountAutoUploadDirectory("", urlBase: self.appDelegate.urlBase, userId: self.appDelegate.userId, account: self.appDelegate.account)
-                NCAutoUpload.shared.alignPhotoLibrary(viewController: self.controller)
+                if value, UIApplication.shared.backgroundRefreshStatus != .available {
+                    Task {
+                        await showInfoBanner(windowScene: self.windowScene,
+                                             text: "_access_background_app_refresh_denied_")
+                    }
+                }
             }
-        } else {
-            updateAccountProperty(\.autoUpload, value: newValue)
-            updateAccountProperty(\.autoUploadFull, value: newValue)
-            NCManageDatabase.shared.clearMetadatasUpload(account: appDelegate.account)
         }
     }
 
     /// Updates the auto-upload image setting.
     func handleAutoUploadImageChange(newValue: Bool) {
-        updateAccountProperty(\.autoUploadImage, value: newValue)
-        if newValue {
-            NCAutoUpload.shared.alignPhotoLibrary(viewController: controller)
+        Task {
+            await database.updateAccountPropertyAsync(\.autoUploadImage, value: newValue, account: session.account)
         }
     }
 
     /// Updates the auto-upload image over WWAN setting.
     func handleAutoUploadWWAnPhotoChange(newValue: Bool) {
-        updateAccountProperty(\.autoUploadWWAnPhoto, value: newValue)
+        Task {
+            await database.updateAccountPropertyAsync(\.autoUploadWWAnPhoto, value: newValue, account: session.account)
+        }
     }
 
     /// Updates the auto-upload video setting.
     func handleAutoUploadVideoChange(newValue: Bool) {
-        updateAccountProperty(\.autoUploadVideo, value: newValue)
-        if newValue {
-            NCAutoUpload.shared.alignPhotoLibrary(viewController: controller)
+        Task {
+            await database.updateAccountPropertyAsync(\.autoUploadVideo, value: newValue, account: session.account)
         }
     }
 
     /// Updates the auto-upload video over WWAN setting.
     func handleAutoUploadWWAnVideoChange(newValue: Bool) {
-        updateAccountProperty(\.autoUploadWWAnVideo, value: newValue)
+        Task {
+            await database.updateAccountPropertyAsync(\.autoUploadWWAnVideo, value: newValue, account: session.account)
+        }
+    }
+
+    /// Sets the cut-off date so only photos/videos created after it are uploaded.
+    func handleAutoUploadOnlyNew(newValue: Bool) {
+        if newValue {
+            autoUploadSinceDate = Date.now
+        } else {
+            autoUploadSinceDate = nil
+        }
+        Task {
+            await database.updateAccountPropertyAsync(\.autoUploadSinceDate, value: autoUploadSinceDate, account: session.account)
+        }
     }
 
     /// Updates the auto-upload full content setting.
-    func handleAutoUploadFullChange(newValue: Bool) {
-        updateAccountProperty(\.autoUploadFull, value: newValue)
-        if newValue {
-            NCAutoUpload.shared.autoUploadFullPhotos(viewController: self.controller, log: "Auto upload full")
-        } else {
-            NCManageDatabase.shared.clearMetadatasUpload(account: appDelegate.account)
+    func handleAutoUploadChange(newValue: Bool, assetCollections: [PHAssetCollection]) {
+        Task {
+            if let tblAccount = await self.database.getTableAccountAsync(predicate: NSPredicate(format: "account == %@", session.account)),
+               tblAccount.autoUploadStart == newValue {
+                return
+            }
+
+            await database.updateAccountPropertyAsync(\.autoUploadStart, value: newValue, account: session.account)
+
+            if newValue {
+                _ = await NCAutoUpload.shared.startManualAutoUploadForAlbums(controller: self.controller,
+                                                                             model: self,
+                                                                             assetCollections: assetCollections,
+                                                                             account: session.account)
+            } else {
+                await database.clearMetadatasUploadAsync(account: session.account)
+            }
         }
     }
 
     /// Updates the auto-upload create subfolder setting.
     func handleAutoUploadCreateSubfolderChange(newValue: Bool) {
-        updateAccountProperty(\.autoUploadCreateSubfolder, value: newValue)
+        Task {
+            await database.updateAccountPropertyAsync(\.autoUploadCreateSubfolder, value: newValue, account: session.account)
+        }
     }
 
     /// Updates the auto-upload subfolder granularity setting.
     func handleAutoUploadSubfolderGranularityChange(newValue: Granularity) {
-        updateAccountProperty(\.autoUploadSubfolderGranularity, value: newValue.rawValue)
-    }
-
-    /// Updates a property of the active account in the database.
-    private func updateAccountProperty<T>(_ keyPath: ReferenceWritableKeyPath<tableAccount, T>, value: T) {
-        guard let activeAccount = manageDatabase.getActiveAccount() else { return }
-        activeAccount[keyPath: keyPath] = value
-        manageDatabase.updateAccount(activeAccount)
+        Task {
+            await database.updateAccountPropertyAsync(\.autoUploadSubfolderGranularity, value: newValue.rawValue, account: session.account)
+        }
     }
 
     /// Returns the path for auto-upload based on the active account's settings.
     ///
     /// - Returns: The path for auto-upload.
     func returnPath() -> String {
-        let autoUploadPath = manageDatabase.getAccountAutoUploadDirectory(urlBase: appDelegate.urlBase, userId: appDelegate.userId, account: appDelegate.account) + "/" + manageDatabase.getAccountAutoUploadFileName()
-        let homeServer = NCUtilityFileSystem().getHomeServer(urlBase: appDelegate.urlBase, userId: appDelegate.userId)
+        let autoUploadPath = self.database.getAccountAutoUploadDirectory(account: session.account, urlBase: session.urlBase, userId: session.userId) + "/" + self.database.getAccountAutoUploadFileName(account: session.account)
+        let homeServer = NCUtilityFileSystem().getHomeServer(session: session)
         let path = autoUploadPath.replacingOccurrences(of: homeServer, with: "")
         return path
     }
@@ -192,16 +200,68 @@ class NCAutoUploadModel: ObservableObject, ViewOnAppearHandling {
     /// - Parameter
     /// serverUrl: The server URL to set as the auto-upload directory.
     func setAutoUploadDirectory(serverUrl: String?) {
-        guard let serverUrl = serverUrl else { return }
-        let home = NCUtilityFileSystem().getHomeServer(urlBase: appDelegate.urlBase, userId: appDelegate.userId)
-        if home != serverUrl {
-            let fileName = (serverUrl as NSString).lastPathComponent
-            NCManageDatabase.shared.setAccountAutoUploadFileName(fileName)
-            if let path = NCUtilityFileSystem().deleteLastPath(serverUrlPath: serverUrl, home: home) {
-                NCManageDatabase.shared.setAccountAutoUploadDirectory(path, urlBase: appDelegate.urlBase, userId: appDelegate.userId, account: appDelegate.account)
+        guard let serverUrl else { return }
+        Task {
+            let home = NCUtilityFileSystem().getHomeServer(session: session)
+            if home != serverUrl {
+                let fileName = (serverUrl as NSString).lastPathComponent
+                await self.database.setAccountAutoUploadFileNameAsync(fileName)
+                if let serverDirectoryUp = NCUtilityFileSystem().serverDirectoryUp(serverUrl: serverUrl, home: home) {
+                    await self.database.setAccountAutoUploadDirectoryAsync(serverDirectoryUp, session: session)
+                }
+            }
+
+            onViewAppear()
+        }
+    }
+
+    /// Returns a display title for the selected auto-upload albums.
+    ///
+    /// - Parameter autoUploadAlbumIds: The local identifiers of the selected albums.
+    /// - Returns: The album's localized title, "Camera Roll" for the user library, or a localized "multiple albums" string when more than one is selected.
+    func createAlbumTitle(autoUploadAlbumIds: Set<String>) -> String {
+        if autoUploadAlbumIds.count == 1 {
+            let album = PHAssetCollection.allAlbums.first(where: { autoUploadAlbumIds.first == $0.localIdentifier })
+            return (album?.assetCollectionSubtype == .smartAlbumUserLibrary) ? NSLocalizedString("_camera_roll_", comment: "") : (album?.localizedTitle ?? "")
+        } else {
+            return NSLocalizedString("_multiple_albums_", comment: "")
+        }
+    }
+
+    /// Whether any auto-upload entry exists for the current account.
+    func existsAutoUpload() -> Bool {
+        let autoUploadServerUrlBase = NCManageDatabase.shared.getAccountAutoUploadServerUrlBase(session: session)
+        return NCManageDatabase.shared.existsAutoUpload(account: session.account, autoUploadServerUrlBase: autoUploadServerUrlBase)
+    }
+
+    /// Deletes pending auto-upload transfers for the current account.
+    func deleteAutoUploadTransfer() {
+        Task {
+            let autoUploadServerUrlBase = await NCManageDatabase.shared.getAccountAutoUploadServerUrlBaseAsync(session: session)
+            await NCManageDatabase.shared.deleteAutoUploadTransferAsync(account: session.account, autoUploadServerUrlBase: autoUploadServerUrlBase)
+        }
+    }
+
+    /// Requests or revokes `Always` location authorization for background location-based auto upload.
+    func handleLocationChange(newValue: Bool) {
+        if let controller = self.controller {
+            if newValue {
+                Task { @MainActor in
+                    let result = await NCBackgroundLocationUploadManager.shared.requestAuthorizationAlwaysAsync(from: controller)
+                    self.locationAutoUploadPermissionGranted = result
+                    NCPreferences().location = result
+                }
+            } else {
+                self.locationAutoUploadPermissionGranted = false
+                NCPreferences().location = false
             }
         }
-        onViewAppear()
+    }
+
+    /// Refreshes `locationAutoUploadPermissionGranted` from the current location authorization status and stored preference.
+    func checkPermission() {
+        let status = CLLocationManager().authorizationStatus
+        locationAutoUploadPermissionGranted = (status == .authorizedAlways && NCPreferences().location)
     }
 }
 

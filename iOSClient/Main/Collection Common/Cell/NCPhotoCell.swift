@@ -1,92 +1,29 @@
-//
-//  NCPhotoCell.swift
-//  Nextcloud
-//
-//  Created by Marino Faggiana on 13/07/2024.
-//  Copyright © 2024 Marino Faggiana. All rights reserved.
-//
-//  Author Marino Faggiana <marino.faggiana@nextcloud.com>
-//
-//  This program is free software: you can redistribute it and/or modify
-//  it under the terms of the GNU General Public License as published by
-//  the Free Software Foundation, either version 3 of the License, or
-//  (at your option) any later version.
-//
-//  This program is distributed in the hope that it will be useful,
-//  but WITHOUT ANY WARRANTY; without even the implied warranty of
-//  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-//  GNU General Public License for more details.
-//
-//  You should have received a copy of the GNU General Public License
-//  along with this program.  If not, see <http://www.gnu.org/licenses/>.
-//
+// SPDX-FileCopyrightText: Nextcloud GmbH
+// SPDX-FileCopyrightText: 2024 Marino Faggiana
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 import UIKit
 
-class NCPhotoCell: UICollectionViewCell, UIGestureRecognizerDelegate, NCCellProtocol {
-
+class NCPhotoCell: UICollectionViewCell, UIGestureRecognizerDelegate, NCCellMainProtocol {
     @IBOutlet weak var imageItem: UIImageView!
     @IBOutlet weak var imageSelect: UIImageView!
-    @IBOutlet weak var imageStatus: UIImageView!
     @IBOutlet weak var imageVisualEffect: UIVisualEffectView!
-    @IBOutlet weak var labelTitle: UILabel!
-    @IBOutlet weak var imageItemBottom: NSLayoutConstraint!
 
-    var objectId = ""
-    var indexPath = IndexPath()
-    private var user = ""
-
-    weak var photoCellDelegate: NCPhotoCellDelegate?
-    var namedButtonMore = ""
-
-    var fileObjectId: String? {
-        get { return objectId }
-        set { objectId = newValue ?? "" }
-    }
-    var filePreviewImageView: UIImageView? {
+    var metadata: tableMetadata?
+    var previewImg: UIImageView? {
         get { return imageItem }
         set { imageItem = newValue }
-    }
-    var filePreviewImageBottom: NSLayoutConstraint? {
-        get { return imageItemBottom }
-        set { imageItemBottom = newValue}
-    }
-    var fileUser: String? {
-        get { return user }
-        set { user = newValue ?? "" }
-    }
-    var fileTitleLabel: UILabel? {
-        get { return labelTitle }
-        set { labelTitle = newValue }
-    }
-    var fileInfoLabel: UILabel? {
-        get { return nil }
-        set { }
-    }
-    var fileSubinfoLabel: UILabel? {
-        get { return nil }
-        set { }
-    }
-    var fileStatusImage: UIImageView? {
-        get { return imageStatus }
-        set { imageStatus = newValue }
-    }
-    var fileLocalImage: UIImageView? {
-        get { return nil }
-        set { }
-    }
-    var fileFavoriteImage: UIImageView? {
-        get { return nil }
-        set { }
     }
 
     override func awakeFromNib() {
         super.awakeFromNib()
+
         initCell()
     }
 
     override func prepareForReuse() {
         super.prepareForReuse()
+
         initCell()
     }
 
@@ -95,51 +32,62 @@ class NCPhotoCell: UICollectionViewCell, UIGestureRecognizerDelegate, NCCellProt
         accessibilityLabel = nil
         accessibilityValue = nil
 
-        imageVisualEffect.clipsToBounds = true
-        imageVisualEffect.alpha = 0.5
+        imageItem.image = nil
 
-        imageSelect.isHidden = true
-        imageSelect.image = NCImageCache.images.checkedYes
-
-        let longPressedGesture = UILongPressGestureRecognizer(target: self, action: #selector(longPress(gestureRecognizer:)))
-        longPressedGesture.minimumPressDuration = 0.5
-        longPressedGesture.delegate = self
-        longPressedGesture.delaysTouchesBegan = true
-        self.addGestureRecognizer(longPressedGesture)
+        imageVisualEffect.isHidden = false
+        imageVisualEffect.effect = nil
+        imageVisualEffect.alpha = 0
+        imageVisualEffect.isUserInteractionEnabled = false
+        imageVisualEffect.backgroundColor = UIColor.white.withAlphaComponent(0.2)
     }
 
     override func snapshotView(afterScreenUpdates afterUpdates: Bool) -> UIView? {
         return nil
     }
 
-    @objc func longPress(gestureRecognizer: UILongPressGestureRecognizer) {
-        photoCellDelegate?.longPressGridItem(with: objectId, indexPath: indexPath, gestureRecognizer: gestureRecognizer)
-    }
-
-    func selected(_ status: Bool, isEditMode: Bool) {
-        if status {
-            imageSelect.isHidden = false
-            imageVisualEffect.isHidden = false
-        } else {
-            imageSelect.isHidden = true
-            imageVisualEffect.isHidden = true
-        }
+    func selected(_ status: Bool, isEditMode: Bool, color: UIColor) {
+        imageVisualEffect.alpha = status ? 1 : 0
+        imageSelect.alpha = status ? 1 : 0
+        imageSelect.image = NCImageCache.shared.getImageCheckedYes(color: color)
     }
 
     func setAccessibility(label: String, value: String) {
         accessibilityLabel = label
         accessibilityValue = value
     }
-
-    func setIconOutlines() {
-        if imageStatus.image != nil {
-            imageStatus.makeCircularBackground(withColor: .systemBackground)
-        } else {
-            imageStatus.backgroundColor = .clear
-        }
-    }
 }
 
-protocol NCPhotoCellDelegate: AnyObject {
-    func longPressGridItem(with objectId: String, indexPath: IndexPath, gestureRecognizer: UILongPressGestureRecognizer)
+extension NCCollectionViewCommon {
+    // MARK: - LAYOUT PHOTO
+    //
+    func photoCell(cell: NCPhotoCell, indexPath: IndexPath, metadata: tableMetadata) -> NCPhotoCell {
+        let ext = global.getSizeExtension(column: self.numberOfColumns)
+
+        cell.metadata = metadata
+
+        if let image = imageCache.getImageCache(ocId: metadata.ocId, etag: metadata.etag, ext: ext) {
+            cell.previewImg?.image = image
+            cell.previewImg?.contentMode = .scaleAspectFill
+        } else if let image = utility.getImage(ocId: metadata.ocId, etag: metadata.etag, ext: ext, userId: metadata.userId, urlBase: metadata.urlBase) {
+            imageCache.addImageCache(ocId: metadata.ocId, etag: metadata.etag, image: image, ext: ext)
+            cell.previewImg?.image = image
+        } else {
+            cell.previewImg?.contentMode = .scaleAspectFit
+            if metadata.iconName.isEmpty {
+                cell.previewImg?.image = imageCache.getImageFile()
+            } else {
+                cell.previewImg?.image = utility.loadImage(named: metadata.iconName, useTypeIconFile: true, account: metadata.account)
+            }
+        }
+
+        // Edit mode
+        //
+        if fileSelect.contains(metadata.ocId) {
+            cell.selected(true, isEditMode: isEditMode, color: NCBrandColor.shared.getElement(account: session.account))
+        } else {
+            cell.selected(false, isEditMode: isEditMode, color: NCBrandColor.shared.getElement(account: session.account))
+        }
+
+        return cell
+    }
 }

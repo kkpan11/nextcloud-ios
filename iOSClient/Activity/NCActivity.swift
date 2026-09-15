@@ -1,26 +1,6 @@
-//
-//  NCActivity.swift
-//  Nextcloud
-//
-//  Created by Marino Faggiana on 17/01/2019.
-//  Copyright © 2019 Marino Faggiana. All rights reserved.
-//
-//  Author Marino Faggiana <marino.faggiana@nextcloud.com>
-//  Author Henrik Storch <henrik.storch@nextcloud.com>
-//
-//  This program is free software: you can redistribute it and/or modify
-//  it under the terms of the GNU General Public License as published by
-//  the Free Software Foundation, either version 3 of the License, or
-//  (at your option) any later version.
-//
-//  This program is distributed in the hope that it will be useful,
-//  but WITHOUT ANY WARRANTY; without even the implied warranty of
-//  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-//  GNU General Public License for more details.
-//
-//  You should have received a copy of the GNU General Public License
-//  along with this program.  If not, see <http://www.gnu.org/licenses/>.
-//
+// SPDX-FileCopyrightText: Nextcloud GmbH
+// SPDX-FileCopyrightText: 2019 Marino Faggiana
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 import UIKit
 import SwiftRichString
@@ -35,37 +15,54 @@ class NCActivity: UIViewController, NCSharePagingContent {
     var height: CGFloat = 0
     var metadata: tableMetadata?
     var showComments: Bool = false
+    var usesGroupedBackground: Bool = false
 
-    let appDelegate = (UIApplication.shared.delegate as? AppDelegate)!
     let utilityFileSystem = NCUtilityFileSystem()
     let utility = NCUtility()
+    let database = NCManageDatabase.shared
     var allItems: [DateCompareable] = []
     var sectionDates: [Date] = []
-    var dataSourceTask: URLSessionTask?
 
     var insets = UIEdgeInsets(top: 8, left: 0, bottom: 0, right: 0)
     var didSelectItemEnable: Bool = true
     var objectType: String?
+    var account: String = ""
 
     var isFetchingActivity = false
     var hasActivityToLoad = true {
-        didSet { tableView.tableFooterView?.isHidden = hasActivityToLoad }
+        didSet {
+            tableView.tableFooterView?.isHidden = hasActivityToLoad
+        }
     }
     var dateAutomaticFetch: Date?
+
+    @MainActor
+    var session: NCSession.Session {
+        if account.isEmpty {
+            NCSession.shared.getSession(controller: tabBarController)
+        } else {
+            NCSession.shared.getSession(account: account)
+        }
+    }
+
+    @MainActor
+    internal var windowScene: UIWindowScene? {
+       SceneManager.shared.getWindowScene(controller: self.tabBarController as? NCMainTabBarController)
+    }
 
     // MARK: - View Life Cycle
 
     override func viewDidLoad() {
         super.viewDidLoad()
 
-        self.navigationController?.navigationBar.prefersLargeTitles = true
-        view.backgroundColor = .systemBackground
+        navigationController?.setNavigationBarAppearance()
+        view.backgroundColor = usesGroupedBackground ? .systemGroupedBackground : .systemBackground
         self.title = NSLocalizedString("_activity_", comment: "")
 
         tableView.allowsSelection = false
         tableView.separatorColor = UIColor.clear
         tableView.contentInset = insets
-        tableView.backgroundColor = .systemBackground
+        tableView.backgroundColor = usesGroupedBackground ? .systemGroupedBackground : .systemBackground
 
         if showComments {
             setupComments()
@@ -74,20 +71,28 @@ class NCActivity: UIViewController, NCSharePagingContent {
 
     func setupComments() {
         // Display Name & Quota
-        guard let activeAccount = NCManageDatabase.shared.getActiveAccount(), height > 0 else {
-            return
-        }
-
+        guard let metadata else { return }
         tableView.register(UINib(nibName: "NCShareCommentsCell", bundle: nil), forCellReuseIdentifier: "cell")
         commentView = Bundle.main.loadNibNamed("NCActivityCommentView", owner: self, options: nil)?.first as? NCActivityCommentView
-        commentView?.setup(urlBase: appDelegate, account: activeAccount) { newComment in
+        commentView?.setup(account: metadata.account) { newComment in
             guard let newComment = newComment, !newComment.isEmpty, let metadata = self.metadata else { return }
-            NextcloudKit.shared.putComments(fileId: metadata.fileId, message: newComment) { _, error in
+            NextcloudKit.shared.putComments(fileId: metadata.fileId, message: newComment, account: metadata.account) { task in
+                Task {
+                    let identifier = await NCNetworking.shared.networkingTasks.createIdentifier(account: metadata.account,
+                                                                                                path: metadata.fileId,
+                                                                                                name: "putComments")
+                    await NCNetworking.shared.networkingTasks.track(identifier: identifier, task: task)
+                }
+            } completion: { _, _, error in
                 if error == .success {
                     self.commentView?.newCommentField.text?.removeAll()
                     self.loadComments()
                 } else {
-                    NCContentPresenter().showError(error: error)
+                    Task {
+                        await showErrorBanner(windowScene: self.windowScene,
+                                              text: error.errorDescription,
+                                              errorCode: error.errorCode)
+                    }
                 }
             }
         }
@@ -96,16 +101,15 @@ class NCActivity: UIViewController, NCSharePagingContent {
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
 
-        navigationController?.setNavigationBarAppearance()
         fetchAll(isInitial: true)
     }
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
 
-        // Cancel Queue & Retrieves Properties
-        NCNetworking.shared.downloadThumbnailActivityQueue.cancelAll()
-        dataSourceTask?.cancel()
+        Task {
+            await NCNetworking.shared.networkingTasks.cancel(identifier: "NCActivity")
+        }
     }
 
     override func viewWillLayoutSubviews() {
@@ -145,7 +149,7 @@ extension NCActivity: UITableViewDelegate {
     }
 
     func tableView(_ tableView: UITableView, heightForRowAt indexPath: IndexPath) -> CGFloat {
-        return 80
+        return 80.0
     }
 
     func tableView(_ tableView: UITableView, viewForHeaderInSection section: Int) -> UIView? {
@@ -158,25 +162,25 @@ extension NCActivity: UITableViewDelegate {
         label.text = utility.getTitleFromDate(sectionDates[section])
         label.textAlignment = .center
 
-        let blur = UIBlurEffect(style: .systemMaterial)
-        let blurredEffectView = UIVisualEffectView(effect: blur)
-        blurredEffectView.layer.cornerRadius = 11
-        blurredEffectView.layer.masksToBounds = true
+        let pill = UIView()
+        pill.backgroundColor = .systemGray5
+        pill.layer.cornerRadius = 11
+        pill.layer.masksToBounds = true
 
-        view.addSubview(blurredEffectView)
+        view.addSubview(pill)
         view.addSubview(label)
 
-        blurredEffectView.translatesAutoresizingMaskIntoConstraints = false
+        pill.translatesAutoresizingMaskIntoConstraints = false
         label.translatesAutoresizingMaskIntoConstraints = false
 
         NSLayoutConstraint.activate([
-            blurredEffectView.topAnchor.constraint(equalTo: view.topAnchor),
-            blurredEffectView.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            blurredEffectView.widthAnchor.constraint(equalToConstant: label.intrinsicContentSize.width + 30),
-            blurredEffectView.heightAnchor.constraint(equalToConstant: 22),
+            pill.topAnchor.constraint(equalTo: view.topAnchor),
+            pill.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            pill.widthAnchor.constraint(equalToConstant: label.intrinsicContentSize.width + 30),
+            pill.heightAnchor.constraint(equalToConstant: 22),
             label.topAnchor.constraint(equalTo: view.topAnchor),
             label.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            label.centerYAnchor.constraint(equalTo: blurredEffectView.centerYAnchor)
+            label.centerYAnchor.constraint(equalTo: pill.centerYAnchor)
         ])
 
         return view
@@ -209,33 +213,54 @@ extension NCActivity: UITableViewDataSource {
     }
 
     func makeCommentCell(_ comment: tableComments, for indexPath: IndexPath) -> UITableViewCell {
-        guard let cell = tableView.dequeueReusableCell(withIdentifier: "cell", for: indexPath) as? NCShareCommentsCell else {
+        guard let cell = tableView.dequeueReusableCell(withIdentifier: "cell", for: indexPath) as? NCShareCommentsCell,
+              let metadata else {
             return UITableViewCell()
         }
 
         cell.indexPath = indexPath
         cell.tableComments = comment
         cell.delegate = self
-        cell.sizeToFit()
+        cell.configureAvatarMenu()
 
-        // Image
-        let fileName = appDelegate.userBaseUrl + "-" + comment.actorId + ".png"
-        NCNetworking.shared.downloadAvatar(user: comment.actorId, dispalyName: comment.actorDisplayName, fileName: fileName, cell: cell, view: tableView)
+        /*
+
+        // Avatar
+        let fileName = NCSession.shared.getFileName(urlBase: metadata.urlBase, user: comment.actorId)
+        let results = NCManageDatabase.shared.getImageAvatarLoaded(fileName: fileName)
+
+        if results.image == nil {
+            cell.avatarImage?.image = utility.loadUserImage(for: comment.actorId, displayName: comment.actorDisplayName, urlBase: NCSession.shared.getSession(account: account).urlBase)
+        } else {
+            cell.avatarImage?.image = results.image
+        }
+
+
+        if let tblAvatar = results.tblAvatar,
+           !tblAvatar.loaded,
+           NCNetworking.shared.downloadAvatarQueue.operations.filter({ ($0 as? NCOperationDownloadAvatar)?.fileName == fileName }).isEmpty {
+            NCNetworking.shared.downloadAvatarQueue.addOperation(NCOperationDownloadAvatar(user: comment.actorId, fileName: fileName, account: account, view: tableView))
+        }
+        */
+
         // Username
         cell.labelUser.text = comment.actorDisplayName
         cell.labelUser.textColor = NCBrandColor.shared.textColor
         // Date
-        cell.labelDate.text = utility.dateDiff(comment.creationDateTime as Date)
-        cell.labelDate.textColor = .systemGray4
+        cell.labelDate.text = utility.getRelativeDateTitle(comment.creationDateTime as Date)
+        cell.labelDate.textColor = .lightGray
         // Message
         cell.labelMessage.text = comment.message
         cell.labelMessage.textColor = NCBrandColor.shared.textColor
         // Button Menu
-        if comment.actorId == appDelegate.userId {
+        if comment.actorId == metadata.userId {
             cell.buttonMenu.isHidden = false
+            cell.configureCommentMenu()
         } else {
             cell.buttonMenu.isHidden = true
         }
+
+        cell.sizeToFit()
 
         return cell
     }
@@ -247,7 +272,8 @@ extension NCActivity: UITableViewDataSource {
         var orderKeysId: [String] = []
 
         cell.idActivity = activity.idActivity
-        cell.indexPath = indexPath
+        cell.account = activity.account
+        cell.index = indexPath
         cell.avatar.image = nil
         cell.avatar.isHidden = true
         cell.didSelectItemEnable = self.didSelectItemEnable
@@ -256,32 +282,62 @@ extension NCActivity: UITableViewDataSource {
 
         // icon
         if !activity.icon.isEmpty {
-            let fileNameIcon = (activity.icon as NSString).lastPathComponent
-            let fileNameLocalPath = utilityFileSystem.directoryUserData + "/" + fileNameIcon
-
-            if FileManager.default.fileExists(atPath: fileNameLocalPath) {
-                if let image = UIImage(contentsOfFile: fileNameLocalPath) {
-                    cell.icon.image = image.withTintColor(NCBrandColor.shared.textColor, renderingMode: .alwaysOriginal)
-                }
-            } else {
-                NextcloudKit.shared.downloadContent(serverUrl: activity.icon) { _, data, error in
-                    if error == .success {
-                        do {
-                            try data!.write(to: NSURL(fileURLWithPath: fileNameLocalPath) as URL, options: .atomic)
-                            self.tableView.reloadData()
-                        } catch { return }
-                    }
+            Task {
+                let results = await NCUtility().convertSVGtoPNGWriteToUserData(serverUrl: activity.icon,
+                                                                               rewrite: false,
+                                                                               account: activity.account,
+                                                                               id: activity.idActivity)
+                if let image = results.image,
+                   cell.idActivity == results.id {
+                    cell.icon.image = image
                 }
             }
         }
 
         // avatar
-        if !activity.user.isEmpty && activity.user != appDelegate.userId {
+        if !activity.user.isEmpty && activity.user != session.userId {
             cell.avatar.isHidden = false
-            cell.fileUser = activity.user
-            let fileName = appDelegate.userBaseUrl + "-" + activity.user + ".png"
-            NCNetworking.shared.downloadAvatar(user: activity.user, dispalyName: nil, fileName: fileName, cell: cell, view: tableView)
+            cell.user = activity.user
             cell.subjectLeadingConstraint.constant = 15
+            cell.configureAvatarMenu()
+
+            let fileName = NCSession.shared.getFileName(urlBase: session.urlBase, user: activity.user)
+            let fileNameLocalPath = self.utilityFileSystem.createServerUrl(serverUrl: utilityFileSystem.directoryUserData, fileName: fileName)
+            if let image = UIImage(contentsOfFile: fileNameLocalPath) {
+                cell.avatar?.image = image
+            }
+            let user = activity.user
+            let idActivity = activity.idActivity
+            let account = session.account
+
+            Task {
+                let etagResource = await database.getTableAvatarAsync(fileName: fileName)?.etag
+                await NCTransferCoordinator.shared.start(identifier: fileName,
+                                                         priority: .userInitiated) {
+                let results = await NextcloudKit.shared.downloadAvatarAsync(
+                    user: user,
+                    fileNameLocalPath: fileNameLocalPath,
+                    sizeImage: NCGlobal.shared.avatarSize,
+                    avatarSizeRounded: NCGlobal.shared.avatarSizeRounded,
+                    etagResource: etagResource,
+                    account: account)
+
+                    if results.error == .success,
+                       let image = results.imageAvatar,
+                       let etag = results.etag,
+                       etag != etagResource {
+                        await self.database.addAvatarAsync(fileName: fileName, etag: etag)
+                        await MainActor.run {
+                            guard
+                                let cell = self.tableView.cellForRow(at: indexPath) as? NCActivityTableViewCell,
+                                cell.idActivity == idActivity else {
+                                return
+                            }
+                            cell.avatar?.image = image
+                        }
+                    }
+                }
+            }
         } else {
             cell.subjectLeadingConstraint.constant = -30
         }
@@ -300,9 +356,9 @@ extension NCActivity: UITableViewDataSource {
             }
 
             for key in keys {
-                if let result = NCManageDatabase.shared.getActivitySubjectRich(account: appDelegate.account, idActivity: activity.idActivity, key: key) {
+                if let result = database.getActivitySubjectRich(account: session.account, idActivity: activity.idActivity, key: key) {
                     orderKeysId.append(result.id)
-                    subject = subject.replacingOccurrences(of: "{\(key)}", with: "<bold>" + result.name + "</bold>")
+                    subject = subject.replacingOccurrences(of: "{\(key)}", with: "<bold>" + result.name.escapedForMarkup + "</bold>")
                 }
             }
 
@@ -315,7 +371,7 @@ extension NCActivity: UITableViewDataSource {
                 $0.color = UIColor.lightGray
             }
 
-            subject += "\n" + "<date>" + utility.dateDiff(activity.date as Date) + "</date>"
+            subject += "\n" + "<date>" + utility.getRelativeDateTitle(activity.date as Date) + "</date>"
             cell.subject.attributedText = subject.set(style: StyleGroup(base: normal, ["bold": bold, "date": date]))
         }
 
@@ -341,12 +397,8 @@ extension NCActivity {
     func fetchAll(isInitial: Bool) {
         guard !isFetchingActivity else { return }
         self.isFetchingActivity = true
-        var bottom: CGFloat = 0
 
-        if let mainTabBar = self.tabBarController?.tabBar as? NCMainTabBar {
-            bottom = -mainTabBar.getHeight()
-        }
-        NCActivityIndicator.shared.start(backgroundView: self.view, bottom: bottom - 35, style: .medium)
+        NCActivityIndicator.shared.start(backgroundView: self.view, style: .medium)
 
         let dispatchGroup = DispatchGroup()
         loadComments(disptachGroup: dispatchGroup)
@@ -371,13 +423,13 @@ extension NCActivity {
     func loadDataSource() {
         var newItems = [DateCompareable]()
 
-        if showComments, let metadata = metadata, let account = NCManageDatabase.shared.getActiveAccount() {
-            let comments = NCManageDatabase.shared.getComments(account: account.account, objectId: metadata.fileId)
+        if showComments, let metadata {
+            let comments = database.getComments(account: metadata.account, objectId: metadata.fileId)
             newItems += comments
         }
 
-        let activities = NCManageDatabase.shared.getActivity(
-            predicate: NSPredicate(format: "account == %@", appDelegate.account),
+        let activities = database.getActivity(
+            predicate: NSPredicate(format: "account == %@", session.account),
             filterFileId: metadata?.fileId)
         newItems += activities.filter
 
@@ -393,11 +445,22 @@ extension NCActivity {
         guard showComments, let metadata = metadata else { return }
         disptachGroup?.enter()
 
-        NextcloudKit.shared.getComments(fileId: metadata.fileId) { _, comments, _, error in
+        NextcloudKit.shared.getComments(fileId: metadata.fileId, account: metadata.account) { task in
+            Task {
+                let identifier = await NCNetworking.shared.networkingTasks.createIdentifier(account: metadata.account,
+                                                                                            path: metadata.fileId,
+                                                                                            name: "getComments")
+                await NCNetworking.shared.networkingTasks.track(identifier: identifier, task: task)
+            }
+        } completion: { _, comments, _, error in
             if error == .success, let comments = comments {
-                NCManageDatabase.shared.addComments(comments, account: metadata.account, objectId: metadata.fileId)
+                self.database.addComments(comments, account: metadata.account, objectId: metadata.fileId)
             } else if error.errorCode != NCGlobal.shared.errorResourceNotFound {
-                NCContentPresenter().showError(error: error)
+                Task {
+                    await showErrorBanner(windowScene: self.windowScene,
+                                          text: error.errorDescription,
+                                          errorCode: error.errorCode)
+                }
             }
 
             if let disptachGroup = disptachGroup {
@@ -410,26 +473,35 @@ extension NCActivity {
 
     /// Check if most recent activivities are loaded, if not trigger reload
     func checkRecentActivity(disptachGroup: DispatchGroup) {
-        guard let result = NCManageDatabase.shared.getLatestActivityId(account: appDelegate.account), metadata == nil, hasActivityToLoad else {
+        Task {
+            // If is already in-flight, do nothing
+            if await NCNetworking.shared.networkingTasks.isReading(identifier: "NCActivity") {
+                return
+            }
+        }
+
+        guard let result = database.getLatestActivityId(account: session.account), metadata == nil, hasActivityToLoad else {
             return self.loadActivity(idActivity: 0, disptachGroup: disptachGroup)
         }
         let resultActivityId = max(result.activityFirstKnown, result.activityLastGiven)
 
         disptachGroup.enter()
 
-        NextcloudKit.shared.getActivity(
-            since: 0,
-            limit: 1,
-            objectId: nil,
-            objectType: objectType,
-            previews: true) { task in
-                self.dataSourceTask = task
+        NextcloudKit.shared.getActivity(since: 0,
+                                        limit: 1,
+                                        objectId: nil,
+                                        objectType: objectType,
+                                        previews: true,
+                                        account: session.account) { task in
+                Task {
+                    await NCNetworking.shared.networkingTasks.track(identifier: "NCActivity", task: task)
+                }
             } completion: { account, _, activityFirstKnown, activityLastGiven, _, error in
                 defer { disptachGroup.leave() }
 
                 let largestActivityId = max(activityFirstKnown, activityLastGiven)
                 guard error == .success,
-                      account == self.appDelegate.account,
+                      account == self.session.account,
                       largestActivityId > resultActivityId
                 else {
                     self.hasActivityToLoad = error.errorCode == NCGlobal.shared.errorNotModified ? false : self.hasActivityToLoad
@@ -441,105 +513,56 @@ extension NCActivity {
     }
 
     func loadActivity(idActivity: Int, limit: Int = 200, disptachGroup: DispatchGroup) {
-        guard hasActivityToLoad else { return }
+        guard hasActivityToLoad else {
+            return
+        }
         var resultActivityId = 0
 
         disptachGroup.enter()
-        NextcloudKit.shared.getActivity(
-            since: idActivity,
-            limit: min(limit, 200),
-            objectId: metadata?.fileId,
-            objectType: objectType,
-            previews: true) { task in
-                self.dataSourceTask = task
+        NextcloudKit.shared.getActivity(since: idActivity,
+                                        limit: min(limit, 200),
+                                        objectId: metadata?.fileId,
+                                        objectType: objectType,
+                                        previews: true,
+                                        account: session.account) { task in
+                Task {
+                    await NCNetworking.shared.networkingTasks.track(identifier: "NCActivity", task: task)
+                }
             } completion: { account, activities, activityFirstKnown, activityLastGiven, _, error in
                 defer { disptachGroup.leave() }
                 guard error == .success,
-                      account == self.appDelegate.account,
+                      account == self.session.account,
                       !activities.isEmpty
                 else {
                     self.hasActivityToLoad = error.errorCode == NCGlobal.shared.errorNotModified ? false : self.hasActivityToLoad
                     return
                 }
-                NCManageDatabase.shared.addActivity(activities, account: account)
+                self.database.addActivity(activities, account: account)
 
                 // update most recently loaded activity only when all activities are loaded (not filtered)
                 let largestActivityId = max(activityFirstKnown, activityLastGiven)
-                if let result = NCManageDatabase.shared.getLatestActivityId(account: self.appDelegate.account) {
+                if let result = self.database.getLatestActivityId(account: self.session.account) {
                     resultActivityId = max(result.activityFirstKnown, result.activityLastGiven)
                 }
                 if self.metadata == nil, largestActivityId > resultActivityId {
-                    NCManageDatabase.shared.updateLatestActivityId(activityFirstKnown: activityFirstKnown, activityLastGiven: activityLastGiven, account: account)
+                    self.database.updateLatestActivityId(activityFirstKnown: activityFirstKnown, activityLastGiven: activityLastGiven, account: account)
                 }
             }
     }
 }
 
 extension NCActivity: NCShareCommentsCellDelegate {
-    func showProfile(with tableComment: tableComments?, sender: Any) {
-        guard let tableComment = tableComment else {
-            return
-        }
-        self.showProfileMenu(userId: tableComment.actorId)
+    func openProfileMenu(with tableComment: tableComments?) -> UIMenu? {
+        guard let tableComment = tableComment else { return nil }
+        return NCContextMenuProfile(userId: tableComment.actorId, session: session, viewController: self).viewMenu()
     }
 
-    func tapMenu(with tableComments: tableComments?, sender: Any) {
-        toggleMenu(with: tableComments)
-    }
-
-    func toggleMenu(with tableComments: tableComments?) {
-        var actions = [NCMenuAction]()
-
-        actions.append(
-            NCMenuAction(
-                title: NSLocalizedString("_edit_comment_", comment: ""),
-                icon: utility.loadImage(named: "pencil", colors: [NCBrandColor.shared.iconImageColor]),
-                action: { _ in
-                    guard let metadata = self.metadata, let tableComments = tableComments else { return }
-
-                    let alert = UIAlertController(title: NSLocalizedString("_edit_comment_", comment: ""), message: nil, preferredStyle: .alert)
-                    alert.addAction(UIAlertAction(title: NSLocalizedString("_cancel_", comment: ""), style: .cancel, handler: nil))
-
-                    alert.addTextField(configurationHandler: { textField in
-                        textField.placeholder = NSLocalizedString("_new_comment_", comment: "")
-                    })
-
-                    alert.addAction(UIAlertAction(title: NSLocalizedString("_ok_", comment: ""), style: .default, handler: { _ in
-                        guard let message = alert.textFields?.first?.text, !message.isEmpty else { return }
-
-                        NextcloudKit.shared.updateComments(fileId: metadata.fileId, messageId: tableComments.messageId, message: message) { _, error in
-                            if error == .success {
-                                self.loadComments()
-                            } else {
-                                NCContentPresenter().showError(error: error)
-                            }
-                        }
-                    }))
-
-                    self.present(alert, animated: true)
-                }
-            )
-        )
-
-        actions.append(
-            NCMenuAction(
-                title: NSLocalizedString("_delete_comment_", comment: ""),
-                destructive: true,
-                icon: utility.loadImage(named: "trash", colors: [.red]),
-                action: { _ in
-                    guard let metadata = self.metadata, let tableComments = tableComments else { return }
-
-                    NextcloudKit.shared.deleteComments(fileId: metadata.fileId, messageId: tableComments.messageId) { _, error in
-                        if error == .success {
-                            self.loadComments()
-                        } else {
-                            NCContentPresenter().showError(error: error)
-                        }
-                    }
-                }
-            )
-        )
-
-        presentMenu(with: actions)
+    func openCommentMenu(with tableComments: tableComments?) -> UIMenu? {
+        guard let tableComments, let metadata else { return nil }
+        return NCContextMenuComment(
+            tableComments: tableComments,
+            metadata: metadata,
+            viewController: self
+        ).viewMenu()
     }
 }

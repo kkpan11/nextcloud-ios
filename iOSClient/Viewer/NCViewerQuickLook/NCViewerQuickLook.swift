@@ -1,45 +1,25 @@
-//
-//  NCViewerQuickLook.swift
-//  Nextcloud
-//
-//  Created by Marino Faggiana on 03/05/2020.
-//  Copyright © 2020 Marino Faggiana. All rights reserved.
-//  Copyright © 2022 Henrik Storch. All rights reserved.
-//  Copyright © 2023 Marino Faggiana. All rights reserved.
-//
-//  Author Marino Faggiana <marino.faggiana@nextcloud.com>
-//  Author Henrik Storch <henrik.storch@nextcloud.com>
-//
-//  This program is free software: you can redistribute it and/or modify
-//  it under the terms of the GNU General Public License as published by
-//  the Free Software Foundation, either version 3 of the License, or
-//  (at your option) any later version.
-//
-//  This program is distributed in the hope that it will be useful,
-//  but WITHOUT ANY WARRANTY; without even the implied warranty of
-//  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-//  GNU General Public License for more details.
-//
-//  You should have received a copy of the GNU General Public License
-//  along with this program.  If not, see <http://www.gnu.org/licenses/>.
-//
+// SPDX-FileCopyrightText: Nextcloud GmbH
+// SPDX-FileCopyrightText: 2020 Marino Faggiana, 2022 Henrik Storch, 2023 Marino Faggiana
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 import UIKit
 import QuickLook
 import NextcloudKit
 import Mantis
 import SwiftUI
+import LucidBanner
+import Alamofire
 
 public protocol NCViewerQuickLookDelegate: AnyObject {
     func dismissQuickLook(fileNameSource: String, hasChangesQuickLook: Bool)
 }
 
-// optional func
+/// Optional implementation
 public extension NCViewerQuickLookDelegate {
     func dismissQuickLook(fileNameSource: String, hasChangesQuickLook: Bool) {}
 }
 
-// if the document has any changes
+/// Flag indicating If the document has any changes
 private var hasChangesQuickLook: Bool = false
 
 @objc class NCViewerQuickLook: QLPreviewController {
@@ -49,9 +29,10 @@ private var hasChangesQuickLook: Bool = false
     private var isEditingEnabled: Bool
     private var metadata: tableMetadata?
     private var timer: Timer?
-    // used to display the save alert
-    private var parentVC: UIViewController?
+    /// Used to display the save alert
+    private var viewController: UIViewController?
     private let utilityFileSystem = NCUtilityFileSystem()
+    private let database = NCManageDatabase.shared
 
     public var saveAsCopyAlert: Bool = true
     public var uploadMetadata: Bool = true
@@ -82,16 +63,24 @@ private var hasChangesQuickLook: Bool = false
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        guard isEditingEnabled else { return }
+        guard isEditingEnabled else {
+            return
+        }
 
         if metadata?.isLivePhoto == true {
-            let error = NKError(errorCode: NCGlobal.shared.errorCharactersForbidden, errorDescription: "_message_disable_overwrite_livephoto_")
-            NCContentPresenter().showInfo(error: error)
+            Task {
+                let windowScene = viewController?.view.window?.windowScene
+                await showWarningBanner(windowScene: windowScene,
+                                        subtitle: "_message_disable_overwrite_livephoto_",
+                                        systemImage: "livephoto.slash",
+                                        imageAnimation: .bounce,
+                                        errorCode: NSURLErrorNotConnectedToInternet)
+            }
         }
 
         if let metadata = metadata, metadata.isImage {
-            let buttonDone = UIBarButtonItem(barButtonSystemItem: .done, target: self, action: #selector(dismissView))
-            let buttonCrop = UIBarButtonItem(image: NCUtility().loadImage(named: "crop"), style: .plain, target: self, action: #selector(crop))
+            let buttonDone = UIBarButtonItem(barButtonSystemItem: .done, target: self, action: #selector(dismissView(_:)))
+            let buttonCrop = UIBarButtonItem(image: NCUtility().loadImage(named: "crop"), style: .plain, target: self, action: #selector(crop(_:)))
             navigationItem.leftBarButtonItems = [buttonDone, buttonCrop]
             startTimer(navigationItem: navigationItem)
         }
@@ -100,13 +89,13 @@ private var hasChangesQuickLook: Bool = false
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         // needs to be saved bc in didDisappear presentingVC is already nil
-        parentVC = presentingViewController
+        self.viewController = presentingViewController
     }
 
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
-        if let metadata = metadata, metadata.classFile != NKCommon.TypeClassFile.image.rawValue {
-            dismissView()
+        if let metadata = metadata, metadata.classFile != NKTypeClassFile.image.rawValue {
+            dismissView(nil)
         }
     }
 
@@ -128,12 +117,10 @@ private var hasChangesQuickLook: Bool = false
         })
     }
 
-    @objc private func dismissView() {
-        guard isEditingEnabled, hasChangesQuickLook, let metadata = metadata else {
-            dismiss(animated: true)
-            return
-        }
-        let alertController = UIAlertController(title: NSLocalizedString("_save_", comment: ""), message: nil, preferredStyle: .alert)
+    private func showSaveAlert() {
+        guard let metadata = metadata else { return }
+
+        let alertController = UIAlertController(title: NSLocalizedString("_save_changes_", comment: ""), message: nil, preferredStyle: .alert)
         var message: String?
 
         if metadata.isLivePhoto {
@@ -161,14 +148,18 @@ private var hasChangesQuickLook: Bool = false
             self.dismiss(animated: true)
         })
 
-        if metadata.isImage {
-            present(alertController, animated: true)
-        } else {
-            parentVC?.present(alertController, animated: true)
+        self.viewController?.present(alertController, animated: true)
+    }
+
+    @objc private func dismissView(_ sender: Any?) {
+        dismiss(animated: true) {
+            if hasChangesQuickLook {
+                self.showSaveAlert()
+            }
         }
     }
 
-    @objc private func crop() {
+    @objc private func crop(_ sender: Any?) {
         guard let image = UIImage(contentsOfFile: url.path) else { return }
         var toolbarConfig = CropToolbarConfig()
 
@@ -214,57 +205,89 @@ extension NCViewerQuickLook: QLPreviewControllerDataSource, QLPreviewControllerD
     }
 
     func previewController(_ controller: QLPreviewController, editingModeFor previewItem: QLPreviewItem) -> QLPreviewItemEditingMode {
-        return isEditingEnabled ? .createCopy : .disabled
+        return isEditingEnabled ? .createCopy : .disabled // File is in private storage, so .updateContents is not possible and will still act as .createCopy.
     }
 
     fileprivate func saveModifiedFile(override: Bool) {
-        guard let metadata = self.metadata else { return }
+        guard let metadata = self.metadata else {
+            return
+        }
         if !uploadMetadata {
             return self.dismiss(animated: true)
         }
-        let ocId = NSUUID().uuidString
-        let size = utilityFileSystem.getFileSize(filePath: url.path)
 
-        if !override {
-            let fileName = utilityFileSystem.createFileName(metadata.fileNameView, serverUrl: metadata.serverUrl, account: metadata.account)
-            metadata.fileName = fileName
-            metadata.fileNameView = fileName
-        }
+        Task { @MainActor in
+            var fileName: String
+            var uploadRequest: UploadRequest?
+            var banner: LucidBanner?
+            var token: Int?
+            let windowScene = viewController?.view.window?.windowScene
+            var error = NKError()
+            let serverUrl = metadata.serverUrl
 
-        let fileNamePath = utilityFileSystem.getDirectoryProviderStorageOcId(ocId, fileNameView: metadata.fileNameView)
-        guard utilityFileSystem.copyFile(atPath: url.path, toPath: fileNamePath) else { return }
+            if override {
+                fileName = metadata.fileName
+            } else {
+                fileName = utilityFileSystem.createFileName(metadata.fileNameView, serverUrl: serverUrl, account: metadata.account)
+            }
+            let serverUrlFileName = utilityFileSystem.createServerUrl(serverUrl: metadata.serverUrl, fileName: fileName)
 
-        let metadataForUpload = NCManageDatabase.shared.createMetadata(
-            account: metadata.account,
-            user: metadata.user,
-            userId: metadata.userId,
-            fileName: metadata.fileName,
-            fileNameView: metadata.fileNameView,
-            ocId: ocId,
-            serverUrl: metadata.serverUrl,
-            urlBase: metadata.urlBase,
-            url: url.path,
-            contentType: "")
+            (banner, token) = showHudBanner(windowScene: windowScene,
+                                            title: "_upload_in_progress_",
+                                            stage: .button,
+                                            onButtonTap: {
+                if let request = uploadRequest {
+                    request.cancel()
+                }
+            })
 
-        metadataForUpload.session = NCNetworking.shared.sessionUploadBackground
-        if override {
-            metadataForUpload.sessionSelector = NCGlobal.shared.selectorUploadFileNODelete
-        } else {
-            metadataForUpload.sessionSelector = NCGlobal.shared.selectorUploadFile
-        }
-        metadataForUpload.size = size
-        metadataForUpload.status = NCGlobal.shared.metadataStatusWaitUpload
-        metadataForUpload.sessionDate = Date()
+            let results = await NextcloudKit.shared.uploadAsync(
+                serverUrlFileName: serverUrlFileName,
+                fileNameLocalPath: url.path,
+                autoMkcol: true,
+                account: metadata.account) { request in
+                    uploadRequest = request
+                } progressHandler: { progress in
+                    Task {@MainActor in
+                        banner?.update(
+                            payload: LucidBannerPayload.Update(progress: Double(progress.fractionCompleted)),
+                            for: token)
+                    }
+                }
+            error = results.error
 
-        NCNetworkingProcess.shared.createProcessUploads(metadatas: [metadataForUpload]) { _ in
+            if error == .success {
+                let results = await NCNetworking.shared.readFileAsync(serverUrlFileName: serverUrlFileName, account: metadata.account)
+                error = results.error
+
+                if results.error == .success, let metadata = results.metadata {
+                    // clean dir
+                    let directory = utilityFileSystem.cleanDirectoryProviderStorageOcId(metadata.ocId, userId: metadata.userId, urlBase: metadata.urlBase)
+                    // copy new file
+                    utilityFileSystem.copyFile(atPath: url.path, toPath: directory + "/" + metadata.fileName)
+                    // add new metadata
+                    await self.database.addMetadataAsync(metadata)
+                    // reload datasource
+                    await NCNetworking.shared.transferDispatcher.notifyAllDelegatesAsync { delegate in
+                        delegate.transferReloadDataSource(serverUrl: serverUrl, requestData: false, status: nil)
+                    }
+                }
+            }
+
+            if let banner {
+                await banner.dismissAsync()
+            }
+
+            if error != .success {
+                await showErrorBanner(windowScene: windowScene, text: error.errorDescription, errorCode: error.errorCode)
+            }
+
             self.dismiss(animated: true)
         }
     }
 
     func previewController(_ controller: QLPreviewController, didSaveEditedCopyOf previewItem: QLPreviewItem, at modifiedContentsURL: URL) {
-        // easier to handle that way than to use `.updateContents`
-        // needs to be moved otherwise it will only be called once!
-        guard utilityFileSystem.moveFile(atPath: modifiedContentsURL.path, toPath: url.path) else { return }
+        guard utilityFileSystem.copyFile(atPath: modifiedContentsURL.path, toPath: url.path) else { return }
         hasChangesQuickLook = true
     }
 }

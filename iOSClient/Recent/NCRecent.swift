@@ -1,31 +1,11 @@
-//
-//  NCRecent.swift
-//  Nextcloud
-//
-//  Created by Marino Faggiana on 29/09/2020.
-//  Copyright © 2020 Marino Faggiana. All rights reserved.
-//
-//  Author Marino Faggiana <marino.faggiana@nextcloud.com>
-//
-//  This program is free software: you can redistribute it and/or modify
-//  it under the terms of the GNU General Public License as published by
-//  the Free Software Foundation, either version 3 of the License, or
-//  (at your option) any later version.
-//
-//  This program is distributed in the hope that it will be useful,
-//  but WITHOUT ANY WARRANTY; without even the implied warranty of
-//  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-//  GNU General Public License for more details.
-//
-//  You should have received a copy of the GNU General Public License
-//  along with this program.  If not, see <http://www.gnu.org/licenses/>.
-//
+// SPDX-FileCopyrightText: Nextcloud GmbH
+// SPDX-FileCopyrightText: 2026 Marino Faggiana
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 import UIKit
 import NextcloudKit
 
 class NCRecent: NCCollectionViewCommon {
-
     required init?(coder aDecoder: NSCoder) {
         super.init(coder: aDecoder)
 
@@ -33,7 +13,7 @@ class NCRecent: NCCollectionViewCommon {
         layoutKey = NCGlobal.shared.layoutViewRecent
         enableSearchBar = false
         headerRichWorkspaceDisable = true
-        emptyImage = utility.loadImage(named: "clock.arrow.circlepath", colors: [NCBrandColor.shared.brandElement])
+        emptyImageName = "clock.arrow.circlepath"
         emptyTitle = "_files_no_files_"
         emptyDescription = ""
     }
@@ -42,30 +22,69 @@ class NCRecent: NCCollectionViewCommon {
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
-        reloadDataSourceNetwork()
+
+        Task {
+            await reloadDataSource()
+        }
     }
 
-    // MARK: - DataSource + NC Endpoint
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
 
-    override func queryDB() {
-        super.queryDB()
-
-        let metadatas = NCManageDatabase.shared.getMetadatas(predicate: NSPredicate(format: "account == %@", self.appDelegate.account), numItems: 200, sorted: "date", ascending: false)
-
-        layoutForView?.sort = "date"
-        layoutForView?.ascending = false
-        layoutForView?.directoryOnTop = false
-
-        self.dataSource = NCDataSource(metadatas: metadatas, account: self.appDelegate.account, layoutForView: layoutForView, favoriteOnTop: false, providers: self.providers, searchResults: self.searchResults)
+        Task {
+            await getServerData()
+        }
     }
 
-    override func reloadDataSourceNetwork(withQueryDB: Bool = false) {
-        super.reloadDataSourceNetwork()
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+
+        Task {
+            await NCNetworking.shared.networkingTasks.cancel(identifier: "NCRecent")
+        }
+    }
+
+    // MARK: - DataSource
+
+    override func reloadDataSource() async {
+        var metadatas: [tableMetadata] = []
+        let fourteenDaysAgo = Calendar.current.date(byAdding: .day, value: -14, to: Date()) ?? Date()
+        let predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
+            NSPredicate(format: "account == %@", session.account),
+            NSPredicate(format: "fileName != %@", NextcloudKit.shared.nkCommonInstance.rootFileName),
+            NSCompoundPredicate(orPredicateWithSubpredicates: [
+                NSPredicate(format: "directory == %@", NSNumber(value: false)),
+                NSPredicate(format: "%K == %lld", "size", 0)
+            ]),
+            NSPredicate(format: "date >= %@", fourteenDaysAgo as NSDate)
+        ])
+        if let results = await self.database.getMetadatasAsync(predicate: predicate,
+                                                               limit: 100) {
+            metadatas = await self.database.sortedMetadata(layoutForView: layoutForView,
+                                                           account: session.account,
+                                                           metadatas: results)
+        }
+
+        self.dataSource = NCCollectionViewDataSource(metadatas: metadatas,
+                                                     layoutForView: layoutForView,
+                                                     account: session.account)
+        await super.reloadDataSource()
+    }
+
+    override func getServerData(forced: Bool = false) async {
+        defer {
+            stopGUIGetServerData()
+        }
+
+        // If is already in-flight, do nothing
+        if await NCNetworking.shared.networkingTasks.isReading(identifier: "NCRecent") {
+            return
+        }
 
         let requestBodyRecent =
         """
         <?xml version=\"1.0\"?>
-        <d:searchrequest xmlns:d=\"DAV:\" xmlns:oc=\"http://owncloud.org/ns\" xmlns:nc=\"http://nextcloud.org/ns\">
+        <d:searchrequest xmlns:d=\"DAV:\" xmlns:oc=\"http://owncloud.org/ns\" xmlns:nc=\"http://nextcloud.org/ns\" xmlns:ns=\"http://nextcloud.org/ns\">
         <d:basicsearch>
             <d:select>
                 <d:prop>
@@ -102,12 +121,30 @@ class NCRecent: NCCollectionViewCommon {
             </d:scope>
         </d:from>
         <d:where>
-            <d:lt>
-                <d:prop>
-                    <d:getlastmodified/>
-                </d:prop>
-                <d:literal>%@</d:literal>
-            </d:lt>
+            <d:and>
+                <d:or>
+                    <d:not>
+                        <d:eq>
+                            <d:prop>
+                                <d:getcontenttype/>
+                            </d:prop>
+                            <d:literal>httpd/unix-directory</d:literal>
+                        </d:eq>
+                    </d:not>
+                    <d:eq>
+                        <d:prop>
+                            <oc:size/>
+                        </d:prop>
+                        <d:literal>0</d:literal>
+                    </d:eq>
+                </d:or>
+                <d:gt>
+                    <d:prop>
+                        <d:getlastmodified/>
+                    </d:prop>
+                    <d:literal>%@</d:literal>
+                </d:gt>
+            </d:and>
         </d:where>
         <d:orderby>
             <d:order>
@@ -119,33 +156,44 @@ class NCRecent: NCCollectionViewCommon {
         </d:orderby>
         <d:limit>
             <d:nresults>100</d:nresults>
+            <ns:firstresult>0</ns:firstresult>
         </d:limit>
         </d:basicsearch>
         </d:searchrequest>
         """
 
-        let dateFormatter = DateFormatter()
-        dateFormatter.locale = Locale(identifier: "en_US_POSIX")
-        dateFormatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ssZZZZZ"
-        let lessDateString = dateFormatter.string(from: Date())
-        let requestBody = String(format: requestBodyRecent, "/files/" + appDelegate.userId, lessDateString)
+        let fourteenDaysAgo = Calendar.current.date(byAdding: .day, value: -14, to: Date()) ?? Date()
+        let greaterDateString = String(Int(fourteenDaysAgo.timeIntervalSince1970))
+        let requestBody = String(format: requestBodyRecent, "/files/" + session.userId, greaterDateString)
+        let showHiddenFiles = NCPreferences().getShowHiddenFiles(account: session.account)
 
-        NextcloudKit.shared.searchBodyRequest(serverUrl: appDelegate.urlBase,
-                                              requestBody: requestBody,
-                                              showHiddenFiles: NCKeychain().showHiddenFiles,
-                                              options: NKRequestOptions(queue: NextcloudKit.shared.nkCommonInstance.backgroundQueue)) { task in
-            self.dataSourceTask = task
-            self.collectionView.reloadData()
-        } completion: { _, files, _, error in
-            if error == .success {
-                NCManageDatabase.shared.convertFilesToMetadatas(files, useFirstAsMetadataFolder: false) { _, metadatas in
-                    // Add metadatas
-                    NCManageDatabase.shared.addMetadatas(metadatas)
-                    self.reloadDataSource()
-                }
-            } else {
-                self.reloadDataSource(withQueryDB: withQueryDB)
+        startGUIGetServerData()
+
+        let resultsSearch = await NextcloudKit.shared.searchBodyRequestAsync(serverUrl: session.urlBase,
+                                                                             requestBody: requestBody,
+                                                                             showHiddenFiles: showHiddenFiles,
+                                                                             account: session.account) { task in
+            Task {
+                await NCNetworking.shared.networkingTasks.track(identifier: "NCRecent", task: task)
             }
+            if self.dataSource.isEmpty() {
+                self.collectionView.reloadData()
+            }
+        }
+
+        guard resultsSearch.error == .success, let files = resultsSearch.files else {
+            return
+        }
+
+        let results = await NCManageDatabaseCreateMetadata().convertFilesToMetadatasAsync(files)
+        await self.database.addMetadatasAsync(results.metadatas)
+
+        if results.metadatas.isEmpty {
+            await NCNetworking.shared.transferDispatcher.notifyAllDelegates { delegate in
+                delegate.transferReloadData(serverUrl: self.serverUrl)
+            }
+        } else {
+            await self.reloadDataSource()
         }
     }
 }

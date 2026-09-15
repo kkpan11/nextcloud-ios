@@ -1,131 +1,97 @@
-//
-//  NCTrash+Networking.swift
-//  Nextcloud
-//
-//  Created by Marino Faggiana on 18/03/24.
-//  Copyright © 2024 Marino Faggiana. All rights reserved.
-//
-//  This program is free software: you can redistribute it and/or modify
-//  it under the terms of the GNU General Public License as published by
-//  the Free Software Foundation, either version 3 of the License, or
-//  (at your option) any later version.
-//
-//  This program is distributed in the hope that it will be useful,
-//  but WITHOUT ANY WARRANTY; without even the implied warranty of
-//  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-//  GNU General Public License for more details.
-//
-//  You should have received a copy of the GNU General Public License
-//  along with this program.  If not, see <http://www.gnu.org/licenses/>.
-//
+// SPDX-FileCopyrightText: Nextcloud GmbH
+// SPDX-FileCopyrightText: 2018 Marino Faggiana
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 import UIKit
 import NextcloudKit
-import Queuer
 import RealmSwift
 
 extension NCTrash {
-    @objc func loadListingTrash() {
-        NextcloudKit.shared.listingTrash(filename: filename, showHiddenFiles: false) { task in
-            self.dataSourceTask = task
-            self.collectionView.reloadData()
-        } completion: { account, items, _, error in
+    func loadListingTrash() async {
+        defer {
             self.refreshControl.endRefreshing()
-            if account == self.appDelegate.account {
-                NCManageDatabase.shared.deleteTrash(filePath: self.getFilePath(), account: account)
-                NCManageDatabase.shared.addTrash(account: account, items: items)
-            }
-            self.reloadDataSource()
-            if error != .success {
-                NCContentPresenter().showError(error: error)
+        }
+
+        // If is already in-flight, do nothing
+        if await NCNetworking.shared.networkingTasks.isReading(identifier: "NCTrash") {
+            return
+        }
+
+        let resultsListingTrash = await NextcloudKit.shared.listingTrashAsync(filename: filename, showHiddenFiles: false, account: session.account) { task in
+            Task {
+                await NCNetworking.shared.networkingTasks.track(identifier: "NCTrash", task: task)
+                await self.collectionView.reloadData()
             }
         }
-    }
 
-    func restoreItem(with fileId: String) {
-        guard let tableTrash = NCManageDatabase.shared.getTrashItem(fileId: fileId, account: appDelegate.account) else { return }
-        let fileNameFrom = tableTrash.filePath + tableTrash.fileName
-        let fileNameTo = appDelegate.urlBase + "/" + NextcloudKit.shared.nkCommonInstance.dav + "/trashbin/" + appDelegate.userId + "/restore/" + tableTrash.fileName
-
-        NextcloudKit.shared.moveFileOrFolder(serverUrlFileNameSource: fileNameFrom, serverUrlFileNameDestination: fileNameTo, overwrite: true) { account, error in
-            guard error == .success, account == self.appDelegate.account else {
-                NCContentPresenter().showError(error: error)
-                return
-            }
-            NCManageDatabase.shared.deleteTrash(fileId: fileId, account: account)
-            self.reloadDataSource()
+        if let items = resultsListingTrash.items {
+            await self.database.addTrashAsync(items: items, account: self.session.account)
         }
+
+        await self.reloadDataSource()
     }
 
-    func emptyTrash() {
-        let serverUrlFileName = appDelegate.urlBase + "/" + NextcloudKit.shared.nkCommonInstance.dav + "/trashbin/" + appDelegate.userId + "/trash"
-
-        NextcloudKit.shared.deleteFileOrFolder(serverUrlFileName: serverUrlFileName) { account, error in
-            guard error == .success, account == self.appDelegate.account else {
-                NCContentPresenter().showError(error: error)
-                return
-            }
-            NCManageDatabase.shared.deleteTrash(fileId: nil, account: self.appDelegate.account)
-            self.reloadDataSource()
+    func restoreItem(with fileId: String) async {
+        guard let result = await self.database.getTableTrashAsync(fileId: fileId, account: session.account) else {
+            return
         }
-    }
+        let serverUrlFileNameSource = result.filePath + result.fileName
+        let serverUrlFileNameDestination = session.urlBase + "/remote.php/dav/trashbin/" + session.userId + "/restore/" + result.fileName
 
-    func deleteItem(with fileId: String) {
-        guard let tableTrash = NCManageDatabase.shared.getTrashItem(fileId: fileId, account: appDelegate.account) else { return }
-        let serverUrlFileName = tableTrash.filePath + tableTrash.fileName
-
-        NextcloudKit.shared.deleteFileOrFolder(serverUrlFileName: serverUrlFileName) { account, error in
-            guard error == .success, account == self.appDelegate.account else {
-                NCContentPresenter().showError(error: error)
-                return
+        let resultsMoveFileOrFolder = await NextcloudKit.shared.moveFileOrFolderAsync(serverUrlFileNameSource: serverUrlFileNameSource, serverUrlFileNameDestination: serverUrlFileNameDestination, overwrite: true, account: self.session.account) { task in
+            Task {
+                let identifier = await NCNetworking.shared.networkingTasks.createIdentifier(account: self.session.account,
+                                                                                            path: serverUrlFileNameSource,
+                                                                                            name: "moveFileOrFolder")
+                await NCNetworking.shared.networkingTasks.track(identifier: identifier, task: task)
             }
-            NCManageDatabase.shared.deleteTrash(fileId: fileId, account: account)
-            self.reloadDataSource()
         }
-    }
-}
 
-class NCOperationDownloadThumbnailTrash: ConcurrentOperation {
+        guard resultsMoveFileOrFolder.error == .success else {
+            return
+        }
 
-    var tableTrash: tableTrash
-    var fileId: String
-    var collectionView: UICollectionView?
-    var cell: NCTrashCellProtocol?
-
-    init(tableTrash: tableTrash, fileId: String, cell: NCTrashCellProtocol?, collectionView: UICollectionView?) {
-        self.tableTrash = tableTrash
-        self.fileId = fileId
-        self.cell = cell
-        self.collectionView = collectionView
+        await self.database.deleteTrashAsync(fileId: fileId, account: self.session.account)
+        await self.reloadDataSource()
     }
 
-    override func start() {
-        guard !isCancelled else { return self.finish() }
-        let fileNamePreviewLocalPath = NCUtilityFileSystem().getDirectoryProviderStoragePreviewOcId(tableTrash.fileId, etag: tableTrash.fileName)
-        let fileNameIconLocalPath = NCUtilityFileSystem().getDirectoryProviderStorageIconOcId(tableTrash.fileId, etag: tableTrash.fileName)
+    func emptyTrash() async {
+        let serverUrlFileName = session.urlBase + "/remote.php/dav/trashbin/" + session.userId + "/trash"
+        let results = await NextcloudKit.shared.deleteFileOrFolderAsync(serverUrlFileName: serverUrlFileName, account: session.account) { task in
+            Task {
+                let identifier = await NCNetworking.shared.networkingTasks.createIdentifier(account: self.session.account,
+                                                                                            path: serverUrlFileName,
+                                                                                            name: "deleteFileOrFolder")
+                await NCNetworking.shared.networkingTasks.track(identifier: identifier, task: task)
+            }
+        }
 
-        NextcloudKit.shared.downloadTrashPreview(fileId: tableTrash.fileId,
-                                                 fileNamePreviewLocalPath: fileNamePreviewLocalPath,
-                                                 fileNameIconLocalPath: fileNameIconLocalPath,
-                                                 widthPreview: NCGlobal.shared.sizePreview,
-                                                 heightPreview: NCGlobal.shared.sizePreview,
-                                                 sizeIcon: NCGlobal.shared.sizeIcon,
-                                                 options: NKRequestOptions(queue: NextcloudKit.shared.nkCommonInstance.backgroundQueue)) { _, imagePreview, _, _, _, error in
+        if results.error != .success {
+            await showErrorBanner(windowScene: self.windowScene, text: results.error.errorDescription, errorCode: results.error.errorCode)
+        }
+        await self.database.deleteTrashAsync(fileId: nil, account: session.account)
+        await self.reloadDataSource()
+    }
 
-            if error == .success, let imagePreview = imagePreview {
-                DispatchQueue.main.async {
-                    if self.fileId == self.cell?.objectId, let imageView = self.cell?.imageItem {
-                        UIView.transition(with: imageView,
-                                          duration: 0.75,
-                                          options: .transitionCrossDissolve,
-                                          animations: { imageView.image = imagePreview },
-                                          completion: nil)
-                    } else {
-                        self.collectionView?.reloadData()
-                    }
+    func deleteItems(with filesId: [String]) async {
+        for fileId in filesId {
+            guard let result = await self.database.getTableTrashAsync(fileId: fileId, account: session.account) else {
+                continue
+            }
+            let serverUrlFileName = result.filePath + result.fileName
+            let results = await NextcloudKit.shared.deleteFileOrFolderAsync(serverUrlFileName: serverUrlFileName, account: session.account) { task in
+                Task {
+                    let identifier = await NCNetworking.shared.networkingTasks.createIdentifier(account: self.session.account,
+                                                                                                path: serverUrlFileName,
+                                                                                                name: "deleteFileOrFolder")
+                    await NCNetworking.shared.networkingTasks.track(identifier: identifier, task: task)
                 }
             }
-            self.finish()
+            if results.error != .success {
+                await showErrorBanner(windowScene: self.windowScene, text: results.error.errorDescription, errorCode: results.error.errorCode)
+            }
+            await self.database.deleteTrashAsync(fileId: fileId, account: session.account)
+            await self.reloadDataSource()
         }
     }
 }

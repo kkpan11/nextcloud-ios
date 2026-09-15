@@ -1,23 +1,30 @@
-//
-//  NCDisplayModel.swift
-//  Nextcloud
-//
-//  Created by Marino Faggiana on 30/05/24.
-//  Copyright © 2024 Marino Faggiana. All rights reserved.
-//
+// SPDX-FileCopyrightText: Nextcloud GmbH
+// SPDX-FileCopyrightText: 2024 Marino Faggiana
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 import Foundation
 import SwiftUI
 
 class NCDisplayModel: ObservableObject, ViewOnAppearHandling {
-    /// AppDelegate
-    let appDelegate = (UIApplication.shared.delegate as? AppDelegate)!
-    /// Keychain access
-    var keychain = NCKeychain()
-    /// Root View Controller
+    // Keychain access
+    var keychain = NCPreferences()
+    // Root View Controller
     @Published var controller: NCMainTabBarController?
-    /// State variable for enabling the automatic appreance
+    // State variable for enabling the automatic appreance
     @Published var appearanceAutomatic: Bool = false
+
+    // State variable for keeping the screen on or off during file transfering 
+    @Published var screenAwakeState = AwakeMode.off {
+        didSet {
+            keychain.screenAwakeMode = screenAwakeState
+        }
+    }
+
+    /// Get session
+    @MainActor
+    var session: NCSession.Session {
+        NCSession.shared.getSession(controller: controller)
+    }
 
     /// Initializes the view model with default values.
     init(controller: NCMainTabBarController?) {
@@ -28,6 +35,7 @@ class NCDisplayModel: ObservableObject, ViewOnAppearHandling {
     /// Triggered when the view appears.
     func onViewAppear() {
         appearanceAutomatic = keychain.appearanceAutomatic
+        screenAwakeState = keychain.screenAwakeMode
     }
 
     // MARK: - All functions

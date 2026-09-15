@@ -37,6 +37,8 @@ disabled_rules:
   - type_name
   - void_function_in_ternary
   - switch_case_alignment
+  - unavailable_condition
+  - orphaned_doc_comment
 excluded:
   - Carthage
   - Pods
@@ -45,5 +47,6 @@ excluded:
   - iOSClient/NCGlobal.swift
   - iOSClient/Utility/NCLivePhoto.swift
   - DerivedData
+  - .claude
   
 reporter: "xcode"

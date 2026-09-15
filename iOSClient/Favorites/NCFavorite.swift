@@ -1,31 +1,11 @@
-//
-//  NCFavorite.swift
-//  Nextcloud
-//
-//  Created by Marino Faggiana on 26/08/2020.
-//  Copyright © 2020 Marino Faggiana. All rights reserved.
-//
-//  Author Marino Faggiana <marino.faggiana@nextcloud.com>
-//
-//  This program is free software: you can redistribute it and/or modify
-//  it under the terms of the GNU General Public License as published by
-//  the Free Software Foundation, either version 3 of the License, or
-//  (at your option) any later version.
-//
-//  This program is distributed in the hope that it will be useful,
-//  but WITHOUT ANY WARRANTY; without even the implied warranty of
-//  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-//  GNU General Public License for more details.
-//
-//  You should have received a copy of the GNU General Public License
-//  along with this program.  If not, see <http://www.gnu.org/licenses/>.
-//
+// SPDX-FileCopyrightText: Nextcloud GmbH
+// SPDX-FileCopyrightText: 2020 Marino Faggiana
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 import UIKit
 import NextcloudKit
 
 class NCFavorite: NCCollectionViewCommon {
-
     required init?(coder aDecoder: NSCoder) {
         super.init(coder: aDecoder)
 
@@ -33,7 +13,8 @@ class NCFavorite: NCCollectionViewCommon {
         layoutKey = NCGlobal.shared.layoutViewFavorite
         enableSearchBar = false
         headerRichWorkspaceDisable = true
-        emptyImage = utility.loadImage(named: "star.fill", colors: [NCBrandColor.shared.yellowFavorite])
+        emptyImageName = "star.fill"
+        emptyImageColors = [NCBrandColor.shared.yellowFavorite]
         emptyTitle = "_favorite_no_files_"
         emptyDescription = "_tutorial_favorite_view_"
     }
@@ -43,43 +24,77 @@ class NCFavorite: NCCollectionViewCommon {
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
 
-        if dataSource.metadatas.isEmpty {
-            reloadDataSource()
+        Task {
+            await self.reloadDataSource()
         }
-        reloadDataSourceNetwork()
     }
 
-    // MARK: - DataSource + NC Endpoint
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
 
-    override func queryDB() {
-        super.queryDB()
+        Task {
+            await getServerData()
+        }
+    }
 
-        var metadatas: [tableMetadata] = []
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+
+        Task {
+            await stopSyncMetadata()
+            await NCNetworking.shared.networkingTasks.cancel(identifier: "NCFavorite")
+        }
+    }
+
+    // MARK: - DataSource
+
+    override func reloadDataSource() async {
+        var predicate: NSPredicate?
 
         if self.serverUrl.isEmpty {
-            metadatas = NCManageDatabase.shared.getMetadatas(predicate: NSPredicate(format: "account == %@ AND favorite == true", self.appDelegate.account))
-        } else {
-            metadatas = NCManageDatabase.shared.getMetadatas(predicate: NSPredicate(format: "account == %@ AND serverUrl == %@", self.appDelegate.account, self.serverUrl))
+           predicate = NSPredicate(format: "account == %@ AND favorite == true AND NOT (status IN %@)", session.account, global.metadataStatusHideInView)
         }
 
-        self.dataSource = NCDataSource(metadatas: metadatas, account: self.appDelegate.account, layoutForView: layoutForView, providers: self.providers, searchResults: self.searchResults)
+        let metadatas = await self.database.getMetadatasAsyncDataSource(withServerUrl: self.serverUrl,
+                                                                        withUserId: self.session.userId,
+                                                                        withAccount: self.session.account,
+                                                                        withLayout: self.layoutForView,
+                                                                        withPreficate: predicate)
+
+        self.dataSource = NCCollectionViewDataSource(metadatas: metadatas,
+                                                     layoutForView: layoutForView,
+                                                     account: session.account)
+        await super.reloadDataSource()
     }
 
-    override func reloadDataSourceNetwork(withQueryDB: Bool = false) {
-        super.reloadDataSourceNetwork()
+    override func getServerData(forced: Bool = false) async {
+        defer {
+            stopGUIGetServerData()
+            startSyncMetadata(metadatas: self.dataSource.getMetadatas())
+        }
 
-        NextcloudKit.shared.listingFavorites(showHiddenFiles: NCKeychain().showHiddenFiles, options: NKRequestOptions(queue: NextcloudKit.shared.nkCommonInstance.backgroundQueue)) { task in
-            self.dataSourceTask = task
-            self.collectionView.reloadData()
-        } completion: { account, files, _, error in
-            if error == .success {
-                NCManageDatabase.shared.convertFilesToMetadatas(files, useFirstAsMetadataFolder: false) { _, metadatas in
-                    NCManageDatabase.shared.updateMetadatasFavorite(account: account, metadatas: metadatas)
-                    self.reloadDataSource()
-                }
-            } else {
-                self.reloadDataSource(withQueryDB: withQueryDB)
+        // If is already in-flight, do nothing
+        if await NCNetworking.shared.networkingTasks.isReading(identifier: "NCFavorite") {
+            return
+        }
+
+        startGUIGetServerData()
+
+        let showHiddenFiles = NCPreferences().getShowHiddenFiles(account: session.account)
+        let resultsListingFavorites = await NextcloudKit.shared.listingFavoritesAsync(showHiddenFiles: showHiddenFiles,
+                                                                                      account: session.account) { task in
+            Task {
+                await NCNetworking.shared.networkingTasks.track(identifier: "NCFavorite", task: task)
             }
+            if self.dataSource.isEmpty() {
+                self.collectionView.reloadData()
+            }
+        }
+
+        if resultsListingFavorites.error == .success, let files = resultsListingFavorites.files {
+            let (_, metadatas) = await NCManageDatabaseCreateMetadata().convertFilesToMetadatasAsync(files)
+            await self.database.updateMetadatasFavoriteAsync(account: session.account, metadatas: metadatas)
+            await self.reloadDataSource()
         }
     }
 }

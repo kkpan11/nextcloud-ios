@@ -33,7 +33,6 @@ class NCDocumentCamera: NSObject, VNDocumentCameraViewControllerDelegate {
     }()
     var viewController: UIViewController?
     let utilityFileSystem = NCUtilityFileSystem()
-    let appDelegate = (UIApplication.shared.delegate as? AppDelegate)!
 
     func openScannerDocument(viewController: UIViewController?) {
         guard VNDocumentCameraViewController.isSupported else { return }
@@ -47,7 +46,7 @@ class NCDocumentCamera: NSObject, VNDocumentCameraViewControllerDelegate {
     func documentCameraViewController(_ controller: VNDocumentCameraViewController, didFinishWith scan: VNDocumentCameraScan) {
         for pageNumber in 0..<scan.pageCount {
             let fileName = utilityFileSystem.createFileName("scan.png", fileDate: Date(), fileType: PHAssetMediaType.image, notUseMask: true)
-            let fileNamePath = utilityFileSystem.directoryScan + "/" + fileName
+            let fileNamePath = utilityFileSystem.createServerUrl(serverUrl: utilityFileSystem.directoryScan, fileName: fileName)
             let image = scan.imageOfPage(at: pageNumber)
             do {
                 try image.pngData()?.write(to: NSURL.fileURL(withPath: fileNamePath))
@@ -62,6 +61,7 @@ class NCDocumentCamera: NSObject, VNDocumentCameraViewControllerDelegate {
                     navigationController.modalPresentationStyle = UIModalPresentationStyle.pageSheet
                     if let viewController = navigationController.topMostViewController() as? NCScan {
                         viewController.serverUrl = controller.currentServerUrl()
+                        viewController.controller = controller
                     }
                     self.viewController?.present(navigationController, animated: true, completion: nil)
                 }
